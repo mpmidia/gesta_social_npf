@@ -4,23 +4,31 @@ import { errorResponse, okResponse } from '../../utils/response'
 import { slugify, generateRandomKey } from '../../utils/crypto'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, isGlobalUser, getScopedNucleoIds } from '../../middlewares/rbac'
+import { requireRole, isGlobalUser, hasBroadReadAccess, getScopedNucleoIds } from '../../middlewares/rbac'
 
 const projetos = new Hono<AppEnv>()
 
 projetos.use('*', authMiddleware)
 
-async function userCanAccessNucleo(user: any, nucleoId: number): Promise<boolean> {
+// Acesso de LEITURA: admin, coord_geral, articulador (institucional) + coord_nucleo do escopo
+async function userCanReadNucleo(user: any, nucleoId: number): Promise<boolean> {
+  if (hasBroadReadAccess(user)) return true
+  return getScopedNucleoIds(user).includes(nucleoId)
+}
+
+// Acesso de ESCRITA (criar/editar/gerir recursos): admin, coord_geral, coord_nucleo do escopo — NUNCA articulador
+async function userCanManageNucleo(user: any, nucleoId: number): Promise<boolean> {
   if (isGlobalUser(user)) return true
   return getScopedNucleoIds(user).includes(nucleoId)
 }
 
 // ===== LISTAR PROJETOS (respeitando escopo) =====
+// admin, coord_geral e articulador enxergam todos os projetos (leitura institucional).
 projetos.get('/', async (c) => {
   const user = c.get('user')
   const nucleoIdFilter = c.req.query('nucleo_id')
 
-  if (isGlobalUser(user)) {
+  if (hasBroadReadAccess(user)) {
     const query = nucleoIdFilter
       ? c.env.DB.prepare('SELECT * FROM projetos WHERE nucleo_id = ? ORDER BY created_at DESC').bind(Number(nucleoIdFilter))
       : c.env.DB.prepare('SELECT * FROM projetos ORDER BY created_at DESC')
@@ -50,7 +58,7 @@ projetos.post('/', requireRole('admin', 'coord_geral', 'coord_nucleo'), async (c
     return errorResponse(c, 422, 'Informe nucleo_id e nome do projeto.')
   }
 
-  const hasAccess = await userCanAccessNucleo(actor, nucleo_id)
+  const hasAccess = await userCanManageNucleo(actor, nucleo_id)
   if (!hasAccess) {
     return errorResponse(c, 403, 'Você não tem acesso a este núcleo.')
   }
@@ -91,7 +99,7 @@ projetos.get('/:projetoId', async (c) => {
   const projeto = await c.env.DB.prepare('SELECT * FROM projetos WHERE id = ?').bind(projetoId).first<any>()
   if (!projeto) return errorResponse(c, 404, 'Projeto não encontrado.')
 
-  const hasAccess = await userCanAccessNucleo(actor, projeto.nucleo_id)
+  const hasAccess = await userCanReadNucleo(actor, projeto.nucleo_id)
   if (!hasAccess) return errorResponse(c, 403, 'Você não tem acesso a este projeto.')
 
   const { results: galeria } = await c.env.DB.prepare(
@@ -112,7 +120,7 @@ projetos.put('/:projetoId', requireRole('admin', 'coord_geral', 'coord_nucleo'),
   const projeto = await c.env.DB.prepare('SELECT * FROM projetos WHERE id = ?').bind(projetoId).first<any>()
   if (!projeto) return errorResponse(c, 404, 'Projeto não encontrado.')
 
-  const hasAccess = await userCanAccessNucleo(actor, projeto.nucleo_id)
+  const hasAccess = await userCanManageNucleo(actor, projeto.nucleo_id)
   if (!hasAccess) return errorResponse(c, 403, 'Você não tem acesso a este projeto.')
 
   await c.env.DB.prepare(
@@ -134,7 +142,7 @@ projetos.post('/:projetoId/galeria', requireRole('admin', 'coord_geral', 'coord_
   const projeto = await c.env.DB.prepare('SELECT * FROM projetos WHERE id = ?').bind(projetoId).first<any>()
   if (!projeto) return errorResponse(c, 404, 'Projeto não encontrado.')
 
-  const hasAccess = await userCanAccessNucleo(actor, projeto.nucleo_id)
+  const hasAccess = await userCanManageNucleo(actor, projeto.nucleo_id)
   if (!hasAccess) return errorResponse(c, 403, 'Você não tem acesso a este projeto.')
 
   const formData = await c.req.formData().catch(() => null)

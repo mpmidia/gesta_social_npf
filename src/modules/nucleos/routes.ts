@@ -4,17 +4,19 @@ import { errorResponse, okResponse } from '../../utils/response'
 import { slugify, generateRandomKey } from '../../utils/crypto'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, requireNucleoAccess, isGlobalUser, getScopedNucleoIds } from '../../middlewares/rbac'
+import { requireRole, requireNucleoAccess, hasBroadReadAccess, getScopedNucleoIds } from '../../middlewares/rbac'
 
 const nucleos = new Hono<AppEnv>()
 
 nucleos.use('*', authMiddleware)
 
 // ===== LISTAR NÚCLEOS (respeitando escopo) =====
+// admin, coord_geral e articulador enxergam todos os núcleos (leitura institucional).
+// coord_nucleo enxerga apenas os núcleos aos quais está vinculado.
 nucleos.get('/', async (c) => {
   const user = c.get('user')
 
-  if (isGlobalUser(user)) {
+  if (hasBroadReadAccess(user)) {
     const { results } = await c.env.DB.prepare(
       'SELECT * FROM nucleos ORDER BY created_at DESC'
     ).all()

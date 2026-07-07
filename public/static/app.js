@@ -1,5 +1,5 @@
 // ============================================================
-// NFP Gestão - Frontend SPA leve (Vanilla JS + Axios + Tailwind CDN)
+// Gestão Social - Frontend SPA leve (Vanilla JS + Axios + Tailwind CDN)
 // ============================================================
 
 axios.defaults.withCredentials = true;
@@ -22,8 +22,19 @@ function isGlobal() {
 function isAdmin() {
   return hasRole('admin');
 }
+function isCoordNucleo() {
+  return hasRole('coord_nucleo');
+}
+function isArticulador() {
+  return hasRole('articulador');
+}
 function scopedNucleoIds() {
   return (CURRENT_USER?.roles || []).filter(r => r.role === 'coord_nucleo').map(r => r.escopo_id);
+}
+// Pode gerir (lançar saída/gerir recursos) os recursos de um determinado núcleo:
+// Admin sempre pode; Coordenador de Núcleo somente do seu próprio escopo.
+function canManageNucleoFinance(nucleoId) {
+  return isAdmin() || scopedNucleoIds().includes(Number(nucleoId));
 }
 
 function fmtMoney(v) {
@@ -79,9 +90,19 @@ function buildNav() {
   items.push({ href: '#/projetos', icon: 'fa-diagram-project', label: 'Projetos' });
   items.push({ href: '#/colaboradores', icon: 'fa-address-card', label: 'Colaboradores' });
 
+  // Financeiro: Admin e Coordenador Geral têm o Painel Geral + Repasses (aprovação/execução).
+  // Articulador NUNCA vê nada de financeiro (apenas leitura institucional em Núcleos/Projetos + Comunicação).
   if (isGlobal()) {
     items.push({ href: '#/financeiro-geral', icon: 'fa-sack-dollar', label: 'Financeiro Geral' });
-    items.push({ href: '#/repasses', icon: 'fa-money-bill-transfer', label: 'Repasses (Aprovação)' });
+    items.push({ href: '#/repasses', icon: 'fa-money-bill-transfer', label: 'Repasses' });
+  }
+  // Coordenador de Núcleo: gestor de recursos do(s) seu(s) núcleo(s) — atalho direto para o
+  // painel financeiro do núcleo (entradas e saídas), sem acesso ao Painel Geral.
+  if (isCoordNucleo() && !isGlobal()) {
+    const meuNucleoId = scopedNucleoIds()[0];
+    if (meuNucleoId) {
+      items.push({ href: `#/nucleos/${meuNucleoId}`, icon: 'fa-wallet', label: 'Meu Financeiro (Núcleo)' });
+    }
   }
   if (isAdmin()) {
     items.push({ href: '#/usuarios', icon: 'fa-users-gear', label: 'Usuários & Permissões' });
@@ -89,9 +110,11 @@ function buildNav() {
   items.push({ href: '#/comunicacao', icon: 'fa-bullhorn', label: 'Comunicação' });
 
   nav.innerHTML = items.map(i => `
-    <a href="${i.href}" class="nav-link flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 transition" data-href="${i.href}">
-      <i class="fas ${i.icon} w-4"></i> <span>${i.label}</span>
+    <a href="${i.href}" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg transition text-[13.5px]" data-href="${i.href}">
+      <i class="fas ${i.icon} w-4 text-center"></i> <span>${i.label}</span>
     </a>`).join('');
+
+  highlightActiveNav();
 }
 
 function highlightActiveNav() {
@@ -99,8 +122,7 @@ function highlightActiveNav() {
   document.querySelectorAll('.nav-link').forEach(a => {
     const base = a.dataset.href;
     const active = hash === base || (base !== '#/' && hash.startsWith(base));
-    a.classList.toggle('bg-gray-800', active);
-    a.classList.toggle('text-white', active);
+    a.classList.toggle('active-nav', active);
   });
 }
 
@@ -149,34 +171,52 @@ window.addEventListener('hashchange', router);
 async function renderVisaoGeral() {
   const content = document.getElementById('page-content');
   let saldoGeralHtml = '';
+  let saldoMeuNucleoHtml = '';
 
   if (isGlobal()) {
     const { data } = await axios.get('/api/financeiro/geral/saldo');
     saldoGeralHtml = `
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      <div class="gs-card p-5">
+        <div class="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3"><i class="fas fa-sack-dollar"></i></div>
         <p class="text-sm text-gray-500 mb-1">Saldo Geral (NFP)</p>
         <p class="text-3xl font-bold text-emerald-600">${fmtMoney(data.data.saldo)}</p>
       </div>`;
+  } else if (isCoordNucleo()) {
+    const meuNucleoId = scopedNucleoIds()[0];
+    if (meuNucleoId) {
+      try {
+        const { data } = await axios.get(`/api/financeiro/nucleo/${meuNucleoId}/saldo`);
+        saldoMeuNucleoHtml = `
+          <a href="#/nucleos/${meuNucleoId}" class="gs-card gs-card-hover p-5 block">
+            <div class="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3"><i class="fas fa-wallet"></i></div>
+            <p class="text-sm text-gray-500 mb-1">Saldo do Meu Núcleo</p>
+            <p class="text-3xl font-bold text-emerald-600">${fmtMoney(data.data.saldo)}</p>
+          </a>`;
+      } catch { /* sem acesso */ }
+    }
   }
 
   const { data: nucleosData } = await axios.get('/api/nucleos');
   const { data: projetosData } = await axios.get('/api/projetos');
 
   content.innerHTML = `
+    <div class="brand-gradient rounded-2xl p-6 sm:p-7 text-white mb-6 shadow-soft relative overflow-hidden">
+      <div class="absolute -top-10 -right-10 w-48 h-48 rounded-full bg-white/10"></div>
+      <h3 class="text-xl font-bold relative z-10">Bem-vindo(a), ${CURRENT_USER.nome.split(' ')[0]} 👋</h3>
+      <p class="text-white/85 text-sm mt-1 relative z-10">${CURRENT_USER.roles.map(r => ROLE_LABELS[r.role]).join(' · ')}</p>
+    </div>
     <div class="grid sm:grid-cols-3 gap-4 mb-6">
-      ${saldoGeralHtml}
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      ${saldoGeralHtml}${saldoMeuNucleoHtml}
+      <div class="gs-card p-5">
+        <div class="w-10 h-10 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center mb-3"><i class="fas fa-people-group"></i></div>
         <p class="text-sm text-gray-500 mb-1">Núcleos ativos</p>
         <p class="text-3xl font-bold text-gray-800">${nucleosData.data.length}</p>
       </div>
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      <div class="gs-card p-5">
+        <div class="w-10 h-10 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center mb-3"><i class="fas fa-diagram-project"></i></div>
         <p class="text-sm text-gray-500 mb-1">Projetos ativos</p>
         <p class="text-3xl font-bold text-gray-800">${projetosData.data.length}</p>
       </div>
-    </div>
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
-      <h3 class="font-semibold text-gray-700 mb-3">Bem-vindo(a), ${CURRENT_USER.nome}</h3>
-      <p class="text-sm text-gray-500">Papéis: ${CURRENT_USER.roles.map(r => ROLE_LABELS[r.role]).join(', ')}</p>
     </div>`;
 }
 
@@ -192,11 +232,11 @@ async function renderNucleos() {
   document.getElementById('page-content').innerHTML = `
     <div class="flex justify-between items-center mb-4">
       <p class="text-sm text-gray-500">${nucleos.length} núcleo(s)</p>
-      ${canCreate ? `<button onclick="openCreateNucleoModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium"><i class="fas fa-plus mr-1"></i> Novo Núcleo</button>` : ''}
+      ${canCreate ? `<button onclick="openCreateNucleoModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-plus mr-1"></i> Novo Núcleo</button>` : ''}
     </div>
     <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
       ${nucleos.map(n => `
-        <a href="#/nucleos/${n.id}" class="block bg-white rounded-xl border p-5 shadow-sm hover:shadow-md transition">
+        <a href="#/nucleos/${n.id}" class="block gs-card gs-card-hover p-5">
           <h3 class="font-semibold text-gray-800 mb-1">${n.nome}</h3>
           <p class="text-sm text-gray-500 line-clamp-2 mb-3">${n.descricao || ''}</p>
           <div class="flex items-center justify-between text-xs text-gray-400">
@@ -213,15 +253,15 @@ function openCreateNucleoModal() {
     <form id="form-nucleo" class="space-y-3">
       <div>
         <label class="block text-sm text-gray-600 mb-1">Nome</label>
-        <input name="nome" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="nome" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Descrição</label>
-        <textarea name="descricao" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm"></textarea>
+        <textarea name="descricao" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></textarea>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Criar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Criar</button>
       </div>
     </form>`);
 
@@ -249,54 +289,54 @@ async function renderNucleoDetalhe(id) {
   const canManage = isGlobal() || scopedNucleoIds().includes(Number(id));
 
   document.getElementById('page-content').innerHTML = `
-    <a href="#/nucleos" class="text-sm text-emerald-600 hover:underline mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
+    <a href="#/nucleos" class="text-sm text-brand-600 hover:underline font-medium mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
     <div class="grid lg:grid-cols-3 gap-4 mb-6">
-      <div class="lg:col-span-2 bg-white rounded-xl border p-5 shadow-sm">
+      <div class="lg:col-span-2 gs-card p-5">
         <h2 class="text-xl font-bold text-gray-800 mb-1">${n.nome}</h2>
         <p class="text-gray-500 text-sm mb-3">${n.descricao || ''}</p>
-        <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/n/${n.slug_publico}" target="_blank" class="text-emerald-600 hover:underline">/n/${n.slug_publico}</a></p>
+        <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/n/${n.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/n/${n.slug_publico}</a></p>
       </div>
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      <div class="gs-card p-5">
         <p class="text-sm text-gray-500 mb-1">Saldo do Núcleo</p>
         ${saldoHtml}
       </div>
     </div>
 
     <div class="grid lg:grid-cols-2 gap-4 mb-6">
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      <div class="gs-card p-5">
         <h3 class="font-semibold text-gray-700 mb-3">Coordenadores</h3>
         <ul class="text-sm space-y-1">
           ${(n.coordenadores || []).map(cd => `<li><i class="fas fa-user mr-1 text-gray-400"></i> ${cd.nome} (${cd.email})</li>`).join('') || '<li class="text-gray-400">Nenhum coordenador vinculado.</li>'}
         </ul>
-        ${isGlobal() ? `<button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-emerald-600 hover:underline"><i class="fas fa-plus mr-1"></i>Vincular coordenador</button>` : ''}
+        ${isGlobal() ? `<button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Vincular coordenador</button>` : ''}
       </div>
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      <div class="gs-card p-5">
         <h3 class="font-semibold text-gray-700 mb-3">Projetos</h3>
         <ul class="text-sm space-y-1">
-          ${(n.projetos || []).map(p => `<li><a href="#/projetos/${p.id}" class="text-emerald-600 hover:underline">${p.nome}</a></li>`).join('') || '<li class="text-gray-400">Nenhum projeto cadastrado.</li>'}
+          ${(n.projetos || []).map(p => `<li><a href="#/projetos/${p.id}" class="text-brand-600 hover:underline font-medium">${p.nome}</a></li>`).join('') || '<li class="text-gray-400">Nenhum projeto cadastrado.</li>'}
         </ul>
-        ${canManage ? `<button onclick="openCreateProjetoModal(${id})" class="mt-3 text-sm text-emerald-600 hover:underline"><i class="fas fa-plus mr-1"></i>Novo projeto</button>` : ''}
+        ${canManage ? `<button onclick="openCreateProjetoModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Novo projeto</button>` : ''}
       </div>
     </div>
 
     ${isGlobal() ? `
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
+    <div class="gs-card p-5">
       <h3 class="font-semibold text-gray-700 mb-3">Repassar recurso do Geral para este Núcleo</h3>
       <form id="form-repasse-nucleo" class="flex flex-wrap gap-3 items-end">
         <input type="hidden" name="nucleo_id" value="${id}" />
         <div>
           <label class="block text-xs text-gray-600 mb-1">Valor (R$)</label>
-          <input name="valor" type="number" step="0.01" min="0.01" required class="border rounded-lg px-3 py-2 text-sm w-40" />
+          <input name="valor" type="number" step="0.01" min="0.01" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-40" />
         </div>
         <div class="flex-1 min-w-[200px]">
           <label class="block text-xs text-gray-600 mb-1">Finalidade</label>
-          <input name="finalidade" class="border rounded-lg px-3 py-2 text-sm w-full" />
+          <input name="finalidade" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-full" />
         </div>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Solicitar repasse</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Solicitar repasse</button>
       </form>
     </div>` : ''}
 
-    <div class="bg-white rounded-xl border p-5 shadow-sm mt-6">
+    <div class="gs-card p-5 mt-6">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Financeiro do Núcleo</h3>
       <div id="nucleo-lancamentos">Carregando...</div>
     </div>`;
@@ -327,10 +367,10 @@ function openAddCoordenadorModal(nucleoId) {
     <h3 class="text-lg font-bold text-gray-800 mb-4">Vincular Coordenador de Núcleo</h3>
     <p class="text-sm text-gray-500 mb-3">Informe o ID do usuário já cadastrado (crie o usuário em Usuários & Permissões antes, com papel coord_nucleo).</p>
     <form id="form-add-coord" class="space-y-3">
-      <input name="user_id" type="number" required placeholder="ID do usuário" class="w-full border rounded-lg px-3 py-2 text-sm" />
+      <input name="user_id" type="number" required placeholder="ID do usuário" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Vincular</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Vincular</button>
       </div>
     </form>`);
 
@@ -359,7 +399,7 @@ async function renderProjetos() {
     <p class="text-sm text-gray-500 mb-4">${projetos.length} projeto(s)</p>
     <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
       ${projetos.map(p => `
-        <a href="#/projetos/${p.id}" class="block bg-white rounded-xl border p-5 shadow-sm hover:shadow-md transition">
+        <a href="#/projetos/${p.id}" class="block gs-card gs-card-hover p-5">
           <h3 class="font-semibold text-gray-800 mb-1">${p.nome}</h3>
           <p class="text-sm text-gray-500 line-clamp-2 mb-3">${p.descricao || ''}</p>
           <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> /p/${p.slug_publico}</p>
@@ -374,15 +414,15 @@ function openCreateProjetoModal(nucleoId) {
       <input type="hidden" name="nucleo_id" value="${nucleoId}" />
       <div>
         <label class="block text-sm text-gray-600 mb-1">Nome</label>
-        <input name="nome" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="nome" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Descrição</label>
-        <textarea name="descricao" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm"></textarea>
+        <textarea name="descricao" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></textarea>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Criar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Criar</button>
       </div>
     </form>`);
 
@@ -411,23 +451,23 @@ async function renderProjetoDetalhe(id) {
   const canRequestRepasse = isGlobal() || scopedNucleoIds().includes(p.nucleo_id);
 
   document.getElementById('page-content').innerHTML = `
-    <a href="#/projetos" class="text-sm text-emerald-600 hover:underline mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
+    <a href="#/projetos" class="text-sm text-brand-600 hover:underline font-medium mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
     <div class="grid lg:grid-cols-3 gap-4 mb-6">
-      <div class="lg:col-span-2 bg-white rounded-xl border p-5 shadow-sm">
+      <div class="lg:col-span-2 gs-card p-5">
         <h2 class="text-xl font-bold text-gray-800 mb-1">${p.nome}</h2>
         <p class="text-gray-500 text-sm mb-3">${p.descricao || ''}</p>
-        <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/p/${p.slug_publico}" target="_blank" class="text-emerald-600 hover:underline">/p/${p.slug_publico}</a></p>
+        <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/p/${p.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/p/${p.slug_publico}</a></p>
       </div>
-      <div class="bg-white rounded-xl border p-5 shadow-sm">
+      <div class="gs-card p-5">
         <p class="text-sm text-gray-500 mb-1">Saldo do Projeto</p>
         ${saldoHtml}
       </div>
     </div>
 
-    <div class="bg-white rounded-xl border p-5 shadow-sm mb-6">
+    <div class="gs-card p-5 mb-6">
       <div class="flex justify-between items-center mb-3">
         <h3 class="font-semibold text-gray-700">Galeria de Imagens</h3>
-        <button onclick="openUploadGaleriaModal(${id})" class="text-sm text-emerald-600 hover:underline"><i class="fas fa-upload mr-1"></i>Enviar imagem</button>
+        <button onclick="openUploadGaleriaModal(${id})" class="text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-upload mr-1"></i>Enviar imagem</button>
       </div>
       <div class="grid grid-cols-3 sm:grid-cols-5 gap-2">
         ${(p.galeria || []).map(g => `<img src="/api/projetos/galeria/${g.id}/arquivo" class="rounded-lg h-24 w-full object-cover" />`).join('') || '<p class="text-gray-400 text-sm col-span-5">Nenhuma imagem.</p>'}
@@ -435,52 +475,52 @@ async function renderProjetoDetalhe(id) {
     </div>
 
     ${canRequestRepasse ? `
-    <div class="bg-white rounded-xl border p-5 shadow-sm mb-6">
+    <div class="gs-card p-5 mb-6">
       <h3 class="font-semibold text-gray-700 mb-3">Solicitar repasse do Núcleo para este Projeto</h3>
       <form id="form-repasse-projeto" class="flex flex-wrap gap-3 items-end">
         <input type="hidden" name="projeto_id" value="${id}" />
         <div>
           <label class="block text-xs text-gray-600 mb-1">Valor (R$)</label>
-          <input name="valor" type="number" step="0.01" min="0.01" required class="border rounded-lg px-3 py-2 text-sm w-40" />
+          <input name="valor" type="number" step="0.01" min="0.01" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-40" />
         </div>
         <div class="flex-1 min-w-[200px]">
           <label class="block text-xs text-gray-600 mb-1">Finalidade (obrigatório)</label>
-          <input name="finalidade" required class="border rounded-lg px-3 py-2 text-sm w-full" />
+          <input name="finalidade" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-full" />
         </div>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Solicitar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Solicitar</button>
       </form>
     </div>` : ''}
 
-    ${isAdmin() ? `
-    <div class="bg-white rounded-xl border p-5 shadow-sm mb-6">
+    ${canManageNucleoFinance(p.nucleo_id) ? `
+    <div class="gs-card p-5 mb-6 border-l-4 border-l-red-400">
       <h3 class="font-semibold text-gray-700 mb-3"><i class="fas fa-money-bill-wave mr-1 text-red-500"></i>Lançar Saída de Pagamento</h3>
       <p class="text-xs text-gray-500 mb-3">Obrigatório anexar comprovante bancário e comprovante fiscal.</p>
       <form id="form-saida-pagamento" enctype="multipart/form-data" class="space-y-3">
         <div class="flex gap-3">
           <div>
             <label class="block text-xs text-gray-600 mb-1">Valor (R$)</label>
-            <input name="valor" type="number" step="0.01" min="0.01" required class="border rounded-lg px-3 py-2 text-sm w-40" />
+            <input name="valor" type="number" step="0.01" min="0.01" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-40" />
           </div>
           <div class="flex-1">
             <label class="block text-xs text-gray-600 mb-1">Finalidade / Prestação de contas</label>
-            <input name="finalidade" required class="border rounded-lg px-3 py-2 text-sm w-full" />
+            <input name="finalidade" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-full" />
           </div>
         </div>
         <div class="flex gap-3">
           <div class="flex-1">
             <label class="block text-xs text-gray-600 mb-1">Comprovante Bancário</label>
-            <input name="comprovante_bancario" type="file" required class="border rounded-lg px-3 py-2 text-sm w-full" />
+            <input name="comprovante_bancario" type="file" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-full" />
           </div>
           <div class="flex-1">
             <label class="block text-xs text-gray-600 mb-1">Comprovante Fiscal</label>
-            <input name="comprovante_fiscal" type="file" required class="border rounded-lg px-3 py-2 text-sm w-full" />
+            <input name="comprovante_fiscal" type="file" required class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-full" />
           </div>
         </div>
         <button type="submit" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Lançar Saída</button>
       </form>
     </div>` : ''}
 
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
+    <div class="gs-card p-5">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Financeiro do Projeto</h3>
       <div id="projeto-lancamentos">Carregando...</div>
     </div>`;
@@ -518,11 +558,11 @@ function openUploadGaleriaModal(projetoId) {
   openModal(`
     <h3 class="text-lg font-bold text-gray-800 mb-4">Enviar Imagem</h3>
     <form id="form-galeria" enctype="multipart/form-data" class="space-y-3">
-      <input type="file" name="imagem" accept="image/*" required class="w-full border rounded-lg px-3 py-2 text-sm" />
-      <input type="text" name="legenda" placeholder="Legenda (opcional)" class="w-full border rounded-lg px-3 py-2 text-sm" />
+      <input type="file" name="imagem" accept="image/*" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      <input type="text" name="legenda" placeholder="Legenda (opcional)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Enviar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Enviar</button>
       </div>
     </form>`);
 
@@ -566,7 +606,7 @@ function renderLancamentosTable(lancamentos) {
             <td class="py-2 pr-3 text-gray-500">${l.finalidade || '-'}</td>
             <td class="py-2 pr-3 text-gray-400">${fmtDate(l.created_at)}</td>
             <td class="py-2 pr-3">
-              ${l.status === 'executado' ? `<button onclick="verComprovantes(${l.id})" class="text-emerald-600 hover:underline text-xs">Comprovantes</button>` : '-'}
+              ${l.status === 'executado' ? `<button onclick="verComprovantes(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Comprovantes</button>` : '-'}
             </td>
           </tr>`).join('')}
       </tbody>
@@ -584,7 +624,7 @@ async function verComprovantes(lancamentoId) {
         ${comprovantes.map(cp => `
           <li class="flex items-center justify-between border rounded-lg px-3 py-2">
             <span class="text-sm"><i class="fas fa-file-invoice mr-1 text-gray-400"></i> ${cp.tipo} — ${cp.nome_arquivo || 'arquivo'}</span>
-            <a href="/api/financeiro/comprovantes/${cp.id}/arquivo" target="_blank" class="text-emerald-600 hover:underline text-xs">Abrir</a>
+            <a href="/api/financeiro/comprovantes/${cp.id}/arquivo" target="_blank" class="text-brand-600 hover:underline text-xs font-medium">Abrir</a>
           </li>`).join('') || '<li class="text-gray-400 text-sm">Nenhum comprovante.</li>'}
       </ul>
       <div class="flex justify-end pt-4"><button onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Fechar</button></div>`);
@@ -600,16 +640,16 @@ async function renderFinanceiroGeral() {
   const { data: lancamentosData } = await axios.get('/api/financeiro/geral/lancamentos');
 
   document.getElementById('page-content').innerHTML = `
-    <div class="bg-white rounded-xl border p-5 shadow-sm mb-6 flex items-center justify-between flex-wrap gap-4">
+    <div class="gs-card p-5 mb-6 flex items-center justify-between flex-wrap gap-4">
       <div>
         <p class="text-sm text-gray-500 mb-1">Saldo Geral Disponível</p>
         <p class="text-3xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>
       </div>
-      <button onclick="openLancarEntradaModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">
+      <button onclick="openLancarEntradaModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
         <i class="fas fa-plus mr-1"></i> Lançar Entrada NFP
       </button>
     </div>
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
+    <div class="gs-card p-5">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Geral</h3>
       ${renderLancamentosTable(lancamentosData.data)}
     </div>`;
@@ -621,15 +661,15 @@ function openLancarEntradaModal() {
     <form id="form-entrada" class="space-y-3">
       <div>
         <label class="block text-sm text-gray-600 mb-1">Valor (R$)</label>
-        <input name="valor" type="number" step="0.01" min="0.01" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="valor" type="number" step="0.01" min="0.01" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Finalidade / Observação</label>
-        <input name="finalidade" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Repasse trimestral NFP" />
+        <input name="finalidade" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" placeholder="Repasse trimestral NFP" />
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Lançar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Lançar</button>
       </div>
     </form>`);
 
@@ -668,29 +708,43 @@ async function renderRepasses() {
       .forEach(l => pendentes.push({ ...l, contexto: `Projeto: ${p.nome}` }));
   }
 
+  // Regra de aprovação:
+  // - repasse_geral_nucleo: SOMENTE o Administrador pode aprovar (Coord. Geral apenas solicitou).
+  // - repasse_nucleo_projeto: Admin ou Coordenador Geral podem aprovar.
+  function podeAprovar(l) {
+    if (l.tipo === 'repasse_geral_nucleo') return isAdmin();
+    return isGlobal();
+  }
+  const tipoLabel = { repasse_geral_nucleo: 'Geral → Núcleo', repasse_nucleo_projeto: 'Núcleo → Projeto' };
+
   document.getElementById('page-content').innerHTML = `
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
-      <h3 class="font-semibold text-gray-700 mb-3">Repasses Pendentes de Aprovação/Execução</h3>
+    <div class="gs-card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-gray-700">Repasses Pendentes de Aprovação/Execução</h3>
+        <p class="text-xs text-gray-400 max-w-sm text-right">Repasses do Geral para um Núcleo só podem ser autorizados pelo Administrador.</p>
+      </div>
       ${pendentes.length ? `
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead><tr class="text-left text-gray-500 border-b">
-            <th class="py-2 pr-3">Contexto</th><th class="py-2 pr-3">Valor</th><th class="py-2 pr-3">Status</th>
+            <th class="py-2 pr-3">Tipo</th><th class="py-2 pr-3">Contexto</th><th class="py-2 pr-3">Valor</th><th class="py-2 pr-3">Status</th>
             <th class="py-2 pr-3">Finalidade</th><th class="py-2 pr-3">Ações</th>
           </tr></thead>
           <tbody>
             ${pendentes.map(l => `
               <tr class="border-b last:border-0">
+                <td class="py-2 pr-3 text-gray-500 text-xs">${tipoLabel[l.tipo] || l.tipo}</td>
                 <td class="py-2 pr-3">${l.contexto}</td>
                 <td class="py-2 pr-3 font-medium">${fmtMoney(l.valor)}</td>
                 <td class="py-2 pr-3">${statusBadge(l.status)}</td>
                 <td class="py-2 pr-3 text-gray-500">${l.finalidade || '-'}</td>
                 <td class="py-2 pr-3 space-x-2">
-                  ${l.status === 'pendente' ? `
-                    <button onclick="aprovarRepasse(${l.id})" class="text-blue-600 hover:underline text-xs">Aprovar</button>
-                    <button onclick="rejeitarRepasse(${l.id})" class="text-red-600 hover:underline text-xs">Rejeitar</button>
+                  ${l.status === 'pendente' && podeAprovar(l) ? `
+                    <button onclick="aprovarRepasse(${l.id})" class="text-blue-600 hover:underline text-xs font-medium">Aprovar</button>
+                    <button onclick="rejeitarRepasse(${l.id})" class="text-red-600 hover:underline text-xs font-medium">Rejeitar</button>
                   ` : ''}
-                  ${l.status === 'aprovado' && isAdmin() ? `<button onclick="openExecutarRepasseModal(${l.id})" class="text-emerald-600 hover:underline text-xs">Executar</button>` : ''}
+                  ${l.status === 'pendente' && !podeAprovar(l) ? `<span class="text-xs text-gray-400 italic">Aguardando Admin</span>` : ''}
+                  ${l.status === 'aprovado' && isAdmin() ? `<button onclick="openExecutarRepasseModal(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Executar</button>` : ''}
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -722,10 +776,10 @@ function openExecutarRepasseModal(id) {
     <h3 class="text-lg font-bold text-gray-800 mb-4">Executar Repasse</h3>
     <p class="text-xs text-gray-500 mb-3">Apenas o Administrador pode executar, anexando o comprovante bancário.</p>
     <form id="form-executar" enctype="multipart/form-data" class="space-y-3">
-      <input type="file" name="comprovante_bancario" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+      <input type="file" name="comprovante_bancario" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Executar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Executar</button>
       </div>
     </form>`);
 
@@ -750,7 +804,7 @@ async function renderColaboradores() {
   const colaboradores = data.data;
 
   document.getElementById('page-content').innerHTML = `
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
+    <div class="gs-card p-5">
       <h3 class="font-semibold text-gray-700 mb-3">${colaboradores.length} colaborador(es) cadastrado(s)</h3>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -766,7 +820,7 @@ async function renderColaboradores() {
                 <td class="py-2 pr-3">${cl.whatsapp}</td>
                 <td class="py-2 pr-3">${cl.status_portal_fazenda === 'pleno' ? 'Pleno' : 'Não Pleno'}</td>
                 <td class="py-2 pr-3">${cl.validado_em ? '<span class="text-emerald-600"><i class="fas fa-check"></i> Validado</span>' : '<span class="text-amber-600">Pendente</span>'}</td>
-                <td class="py-2 pr-3">${!cl.validado_em ? `<button onclick="validarColaborador(${cl.id})" class="text-emerald-600 hover:underline text-xs">Validar</button>` : '-'}</td>
+                <td class="py-2 pr-3">${!cl.validado_em ? `<button onclick="validarColaborador(${cl.id})" class="text-brand-600 hover:underline text-xs font-medium">Validar</button>` : '-'}</td>
               </tr>`).join('') || `<tr><td colspan="6" class="py-4 text-gray-400 text-center">Nenhum colaborador cadastrado ainda.</td></tr>`}
           </tbody>
         </table>
@@ -793,9 +847,9 @@ async function renderUsuarios() {
   document.getElementById('page-content').innerHTML = `
     <div class="flex justify-between items-center mb-4">
       <p class="text-sm text-gray-500">${usuarios.length} usuário(s)</p>
-      <button onclick="openCreateUsuarioModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium"><i class="fas fa-plus mr-1"></i> Novo Usuário</button>
+      <button onclick="openCreateUsuarioModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-plus mr-1"></i> Novo Usuário</button>
     </div>
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
+    <div class="gs-card p-5">
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead><tr class="text-left text-gray-500 border-b">
@@ -827,19 +881,19 @@ function openCreateUsuarioModal() {
     <form id="form-usuario" class="space-y-3">
       <div>
         <label class="block text-sm text-gray-600 mb-1">Nome</label>
-        <input name="nome" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="nome" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">E-mail</label>
-        <input name="email" type="email" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="email" type="email" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Senha</label>
-        <input name="senha" type="password" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="senha" type="password" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Papel</label>
-        <select name="role" id="role-select" required class="w-full border rounded-lg px-3 py-2 text-sm">
+        <select name="role" id="role-select" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
           ${isAdmin() ? '<option value="admin">Administrador</option><option value="coord_geral">Coordenador Geral</option>' : ''}
           <option value="coord_nucleo">Coordenador de Núcleo</option>
           <option value="articulador">Articulador</option>
@@ -847,11 +901,11 @@ function openCreateUsuarioModal() {
       </div>
       <div id="nucleo-field" class="hidden">
         <label class="block text-sm text-gray-600 mb-1">Núcleo</label>
-        <select name="nucleo_id" id="nucleo-select" class="w-full border rounded-lg px-3 py-2 text-sm"></select>
+        <select name="nucleo_id" id="nucleo-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></select>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Criar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Criar</button>
       </div>
     </form>`);
 
@@ -913,9 +967,9 @@ async function renderComunicacao() {
   document.getElementById('page-content').innerHTML = `
     <div class="flex justify-between items-center mb-4">
       <p class="text-sm text-gray-500">${campanhas.length} campanha(s)</p>
-      <button onclick="openCreateCampanhaModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium"><i class="fas fa-plus mr-1"></i> Nova Campanha</button>
+      <button onclick="openCreateCampanhaModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-plus mr-1"></i> Nova Campanha</button>
     </div>
-    <div class="bg-white rounded-xl border p-5 shadow-sm">
+    <div class="gs-card p-5">
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead><tr class="text-left text-gray-500 border-b">
@@ -927,7 +981,7 @@ async function renderComunicacao() {
                 <td class="py-2 pr-3">${cp.titulo}</td>
                 <td class="py-2 pr-3">${cp.canal}</td>
                 <td class="py-2 pr-3">${cp.segmento_tipo}${cp.segmento_id ? ' #' + cp.segmento_id : ''}</td>
-                <td class="py-2 pr-3"><button onclick="enviarCampanha(${cp.id})" class="text-emerald-600 hover:underline text-xs">Disparar (stub)</button></td>
+                <td class="py-2 pr-3"><button onclick="enviarCampanha(${cp.id})" class="text-brand-600 hover:underline text-xs font-medium">Disparar (stub)</button></td>
               </tr>`).join('') || `<tr><td colspan="4" class="py-4 text-gray-400 text-center">Nenhuma campanha criada.</td></tr>`}
           </tbody>
         </table>
@@ -947,11 +1001,11 @@ function openCreateCampanhaModal() {
     <form id="form-campanha" class="space-y-3">
       <div>
         <label class="block text-sm text-gray-600 mb-1">Título</label>
-        <input name="titulo" required class="w-full border rounded-lg px-3 py-2 text-sm" />
+        <input name="titulo" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Canal</label>
-        <select name="canal" class="w-full border rounded-lg px-3 py-2 text-sm">
+        <select name="canal" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
           <option value="whatsapp">WhatsApp</option>
           <option value="email">E-mail</option>
           <option value="ambos">Ambos</option>
@@ -959,7 +1013,7 @@ function openCreateCampanhaModal() {
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Segmento</label>
-        <select name="segmento_tipo" id="segmento-tipo" class="w-full border rounded-lg px-3 py-2 text-sm">
+        <select name="segmento_tipo" id="segmento-tipo" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
           <option value="nucleo">Núcleo específico</option>
           <option value="projeto">Projeto específico</option>
           ${isGlobal() ? '<option value="todos">Todos os colaboradores</option>' : ''}
@@ -967,17 +1021,17 @@ function openCreateCampanhaModal() {
       </div>
       <div id="segmento-id-field">
         <label class="block text-sm text-gray-600 mb-1">Selecione</label>
-        <select name="segmento_id" id="segmento-id" class="w-full border rounded-lg px-3 py-2 text-sm">
+        <select name="segmento_id" id="segmento-id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
           ${nucleos.map(n => `<option value="${n.id}">${n.nome}</option>`).join('')}
         </select>
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Corpo da mensagem (use {{nome}} para personalizar)</label>
-        <textarea name="corpo_template" rows="4" required class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Olá {{nome}}, participe da nossa campanha..."></textarea>
+        <textarea name="corpo_template" rows="4" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" placeholder="Olá {{nome}}, participe da nossa campanha..."></textarea>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Criar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Criar</button>
       </div>
     </form>`);
 
@@ -1033,7 +1087,9 @@ async function bootstrap() {
     return;
   }
 
-  document.getElementById('user-info').textContent = `${CURRENT_USER.nome} · ${CURRENT_USER.roles.map(r => ROLE_LABELS[r.role]).join(', ')}`;
+  document.getElementById('user-info').innerHTML = `<span class="block text-white font-medium truncate max-w-[9.5rem]">${CURRENT_USER.nome}</span><span class="block text-[11px] text-gray-500 truncate max-w-[9.5rem]">${CURRENT_USER.roles.map(r => ROLE_LABELS[r.role]).join(', ')}</span>`;
+  const initials = CURRENT_USER.nome.trim().split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+  document.getElementById('user-avatar').textContent = initials || '?';
   buildNav();
   router();
 

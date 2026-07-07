@@ -10,9 +10,19 @@ const financeiro = new Hono<AppEnv>()
 
 financeiro.use('*', authMiddleware)
 
+// Acesso aos painéis financeiros de Núcleo/Projeto: admin, coord_geral e o coord_nucleo
+// do respectivo escopo. Articulador NUNCA tem acesso financeiro (isGlobalUser não o inclui
+// e ele nunca possui escopo coord_nucleo) — bloqueado por definição.
 async function userCanAccessNucleo(user: any, nucleoId: number): Promise<boolean> {
   if (isGlobalUser(user)) return true
   return getScopedNucleoIds(user).includes(nucleoId)
+}
+
+// Gestão de saídas no Projeto: admin OU coord_nucleo do núcleo dono do projeto.
+// Coord_geral e Articulador NÃO lançam saídas (apenas o Coordenador de Núcleo gere os recursos do dia a dia).
+function userCanManageSaidaProjeto(user: any, nucleoId: number): boolean {
+  if (isAdmin(user)) return true
+  return user.roles?.some((r: any) => r.role === 'coord_nucleo' && r.escopo_id === nucleoId)
 }
 
 async function getNucleoIdFromProjeto(db: D1Database, projetoId: number): Promise<number | null> {
@@ -123,13 +133,19 @@ financeiro.get('/projeto/:projetoId/lancamentos', async (c) => {
   return okResponse(c, results)
 })
 
-// Saída de pagamento no Projeto — SOMENTE ADMIN, com comprovante bancário E fiscal obrigatórios
-financeiro.post('/projeto/:projetoId/saidas', requireRole('admin'), async (c) => {
+// Saída de pagamento no Projeto — Admin OU Coordenador de Núcleo (do núcleo dono do projeto),
+// com comprovante bancário E fiscal obrigatórios. O Coordenador de Núcleo é quem faz a gestão
+// diária dos recursos do seu núcleo/projetos, por isso também pode lançar saídas.
+financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo'), async (c) => {
   const actor = c.get('user')
   const projetoId = Number(c.req.param('projetoId'))
 
   const projeto = await c.env.DB.prepare('SELECT id, nucleo_id FROM projetos WHERE id = ?').bind(projetoId).first<any>()
   if (!projeto) return errorResponse(c, 404, 'Projeto não encontrado.')
+
+  if (!userCanManageSaidaProjeto(actor, projeto.nucleo_id)) {
+    return errorResponse(c, 403, 'Apenas o Administrador ou o Coordenador do Núcleo responsável podem lançar saídas neste projeto.')
+  }
 
   const formData = await c.req.formData().catch(() => null)
   if (!formData) return errorResponse(c, 422, 'Envie os dados via multipart/form-data.')
@@ -261,7 +277,9 @@ financeiro.post('/repasses/nucleo-projeto', requireRole('admin', 'coord_geral', 
   return okResponse(c, { id, status: 'pendente' }, 201)
 })
 
-// Aprovar repasse (admin, coord_geral) — vale para geral->nucleo e nucleo->projeto
+// Aprovar repasse:
+// - Geral -> Núcleo: SOMENTE o Administrador pode autorizar (Coord. Geral apenas solicita).
+// - Núcleo -> Projeto: Admin ou Coord. Geral podem autorizar.
 financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
@@ -270,6 +288,9 @@ financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'coord_geral'), as
   if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
   if (!['repasse_geral_nucleo', 'repasse_nucleo_projeto'].includes(lancamento.tipo)) {
     return errorResponse(c, 400, 'Este lançamento não é um repasse aprovável.')
+  }
+  if (lancamento.tipo === 'repasse_geral_nucleo' && !isAdmin(actor)) {
+    return errorResponse(c, 403, 'Apenas o Administrador pode autorizar repasses do Painel Geral para um Núcleo.')
   }
   if (lancamento.status !== 'pendente') {
     return errorResponse(c, 409, `Lançamento já está com status "${lancamento.status}".`)

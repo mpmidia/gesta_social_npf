@@ -20,6 +20,7 @@ export function requireRole(...roles: Role[]): MiddlewareHandler<AppEnv> {
 /**
  * Verifica acesso a um Núcleo específico:
  * - admin e coord_geral têm acesso irrestrito a qualquer núcleo
+ * - articulador tem acesso de LEITURA a qualquer núcleo (institucional/comunicação, sem financeiro)
  * - coord_nucleo só acessa se possuir user_roles.escopo_id === nucleoId
  * O nucleoId é lido do param de rota informado (default 'nucleoId').
  */
@@ -29,7 +30,8 @@ export function requireNucleoAccess(paramName = 'nucleoId'): MiddlewareHandler<A
     const nucleoId = Number(c.req.param(paramName))
 
     const isGlobal = user.roles?.some((r) => r.role === 'admin' || r.role === 'coord_geral')
-    if (isGlobal) {
+    const isArticulador = user.roles?.some((r) => r.role === 'articulador')
+    if (isGlobal || isArticulador) {
       await next()
       return
     }
@@ -57,4 +59,18 @@ export function isGlobalUser(user: AppEnv['Variables']['user']): boolean {
 
 export function isAdmin(user: AppEnv['Variables']['user']): boolean {
   return user.roles.some((r) => r.role === 'admin')
+}
+
+export function isArticulador(user: AppEnv['Variables']['user']): boolean {
+  return user.roles.some((r) => r.role === 'articulador')
+}
+
+/**
+ * Acesso de LEITURA institucional (Núcleos/Projetos): admin, coord_geral e articulador
+ * enxergam tudo. coord_nucleo enxerga apenas os núcleos/projetos do seu escopo.
+ * Usado para listagens onde o Articulador precisa visualizar núcleos/projetos
+ * (para organizar campanhas/comunicação) mas SEM qualquer acesso financeiro.
+ */
+export function hasBroadReadAccess(user: AppEnv['Variables']['user']): boolean {
+  return isGlobalUser(user) || isArticulador(user)
 }
