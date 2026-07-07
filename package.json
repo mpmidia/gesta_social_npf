@@ -4,14 +4,20 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "preview": "wrangler pages dev dist",
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "clean-port": "fuser -k 3000/tcp 2>/dev/null || true",
+    "db:migrate:local": "wrangler d1 migrations apply nfp-gestao-production --local",
+    "db:seed": "wrangler d1 execute nfp-gestao-production --local --file=./seed.sql",
+    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed",
+    "db:console:local": "wrangler d1 execute nfp-gestao-production --local"
   },
   "dependencies": {
     "hono": "^4.12.27"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@hono/vite-build": "^1.2.0",
     "@hono/vite-dev-server": "^0.25.2",
     "vite": "^6.3.5",
