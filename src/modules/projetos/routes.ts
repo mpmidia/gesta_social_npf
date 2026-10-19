@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../types/bindings'
-import { errorResponse, okResponse } from '../../utils/response'
+import { errorResponse, okResponse, isFormDataFile } from '../../utils/response'
 import { slugify, generateRandomKey } from '../../utils/crypto'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
@@ -51,7 +51,7 @@ projetos.get('/', async (c) => {
 // ===== CRIAR PROJETO (admin, coord_geral, coord_nucleo do respectivo núcleo) =====
 projetos.post('/', requireRole('admin', 'coord_geral', 'coord_nucleo'), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ nucleo_id?: number; nome?: string; descricao?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ nucleo_id?: number; nome?: string; descricao?: string }>().catch(() => ({} as any))
   const { nucleo_id, nome, descricao } = body
 
   if (!nucleo_id || !nome) {
@@ -115,7 +115,7 @@ projetos.get('/:projetoId', async (c) => {
 projetos.put('/:projetoId', requireRole('admin', 'coord_geral', 'coord_nucleo'), async (c) => {
   const actor = c.get('user')
   const projetoId = Number(c.req.param('projetoId'))
-  const body = await c.req.json<{ nome?: string; descricao?: string; ativo?: boolean }>().catch(() => ({}))
+  const body = await c.req.json<{ nome?: string; descricao?: string; ativo?: boolean }>().catch(() => ({} as any))
 
   const projeto = await c.env.DB.prepare('SELECT * FROM projetos WHERE id = ?').bind(projetoId).first<any>()
   if (!projeto) return errorResponse(c, 404, 'Projeto não encontrado.')
@@ -149,7 +149,7 @@ projetos.post('/:projetoId/galeria', requireRole('admin', 'coord_geral', 'coord_
   const file = formData?.get('imagem')
   const legenda = formData?.get('legenda')?.toString() ?? null
 
-  if (!file || !(file instanceof File)) {
+  if (!file || !isFormDataFile(file)) {
     return errorResponse(c, 422, 'Envie um arquivo no campo "imagem".')
   }
 

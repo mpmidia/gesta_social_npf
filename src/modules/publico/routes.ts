@@ -85,7 +85,7 @@ publico.post('/colaborador', async (c) => {
     cpf?: string
     whatsapp?: string
     status_portal_fazenda?: string
-  }>().catch(() => ({}))
+  }>().catch(() => ({} as any))
 
   const { nucleo_slug, projeto_slug, nome, cpf, whatsapp, status_portal_fazenda } = body
 

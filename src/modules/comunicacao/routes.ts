@@ -3,7 +3,7 @@ import type { AppEnv } from '../../types/bindings'
 import { errorResponse, okResponse } from '../../utils/response'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, isGlobalUser, getScopedNucleoIds } from '../../middlewares/rbac'
+import { requireRole, isGlobalUser, isArticulador, getScopedNucleoIds } from '../../middlewares/rbac'
 import { sendEmailStub, sendWhatsAppStub } from './providers'
 
 const comunicacao = new Hono<AppEnv>()
@@ -20,7 +20,7 @@ comunicacao.get('/templates', requireRole(...ROLES_COMUNICACAO), async (c) => {
 
 comunicacao.post('/templates', requireRole(...ROLES_COMUNICACAO), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ nome?: string; canal?: string; corpo?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ nome?: string; canal?: string; corpo?: string }>().catch(() => ({} as any))
   const { nome, canal, corpo } = body
 
   if (!nome || !canal || !corpo) return errorResponse(c, 422, 'Informe nome, canal e corpo do template.')
@@ -49,7 +49,7 @@ comunicacao.post('/campanhas', requireRole(...ROLES_COMUNICACAO), async (c) => {
     corpo_template?: string
     segmento_tipo?: string
     segmento_id?: number
-  }>().catch(() => ({}))
+  }>().catch(() => ({} as any))
 
   const { titulo, canal, corpo_template, segmento_tipo, segmento_id } = body
 
@@ -59,11 +59,21 @@ comunicacao.post('/campanhas', requireRole(...ROLES_COMUNICACAO), async (c) => {
   if (!['email', 'whatsapp', 'ambos'].includes(canal)) return errorResponse(c, 422, 'Canal inválido.')
   if (!['nucleo', 'projeto', 'todos'].includes(segmento_tipo)) return errorResponse(c, 422, 'segmento_tipo inválido.')
 
-  // Isolamento: coord_nucleo só pode segmentar núcleos aos quais tem acesso
-  if (!isGlobalUser(actor) && segmento_tipo === 'nucleo') {
+  // Isolamento: coord_nucleo só pode segmentar núcleos/projetos aos quais tem acesso.
+  // Articulador tem leitura ampla de núcleos/projetos (hasBroadReadAccess), logo pode
+  // segmentar qualquer núcleo/projeto existente, assim como admin/coord_geral.
+  if (!isGlobalUser(actor) && !isArticulador(actor) && segmento_tipo === 'nucleo') {
     const scopedIds = getScopedNucleoIds(actor)
     if (!segmento_id || !scopedIds.includes(segmento_id)) {
       return errorResponse(c, 403, 'Você só pode criar campanhas para núcleos aos quais tem acesso.')
+    }
+  }
+  if (!isGlobalUser(actor) && !isArticulador(actor) && segmento_tipo === 'projeto') {
+    if (!segmento_id) return errorResponse(c, 422, 'Informe o segmento_id do projeto.')
+    const projeto = await c.env.DB.prepare('SELECT nucleo_id FROM projetos WHERE id = ?').bind(segmento_id).first<any>()
+    const scopedIds = getScopedNucleoIds(actor)
+    if (!projeto || !scopedIds.includes(projeto.nucleo_id)) {
+      return errorResponse(c, 403, 'Você só pode criar campanhas para projetos de núcleos aos quais tem acesso.')
     }
   }
   if (!isGlobalUser(actor) && segmento_tipo === 'todos') {
@@ -92,9 +102,16 @@ comunicacao.post('/campanhas/:id/enviar', requireRole(...ROLES_COMUNICACAO), asy
   const campanha = await c.env.DB.prepare('SELECT * FROM campanhas WHERE id = ?').bind(id).first<any>()
   if (!campanha) return errorResponse(c, 404, 'Campanha não encontrada.')
 
-  if (!isGlobalUser(actor) && campanha.segmento_tipo === 'nucleo') {
+  if (!isGlobalUser(actor) && !isArticulador(actor) && campanha.segmento_tipo === 'nucleo') {
     const scopedIds = getScopedNucleoIds(actor)
     if (!scopedIds.includes(campanha.segmento_id)) {
+      return errorResponse(c, 403, 'Você não tem acesso a este segmento.')
+    }
+  }
+  if (!isGlobalUser(actor) && !isArticulador(actor) && campanha.segmento_tipo === 'projeto') {
+    const projeto = await c.env.DB.prepare('SELECT nucleo_id FROM projetos WHERE id = ?').bind(campanha.segmento_id).first<any>()
+    const scopedIds = getScopedNucleoIds(actor)
+    if (!projeto || !scopedIds.includes(projeto.nucleo_id)) {
       return errorResponse(c, 403, 'Você não tem acesso a este segmento.')
     }
   }

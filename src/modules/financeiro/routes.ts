@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../types/bindings'
-import { errorResponse, okResponse } from '../../utils/response'
+import { errorResponse, okResponse, isFormDataFile } from '../../utils/response'
 import { generateRandomKey } from '../../utils/crypto'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
@@ -46,7 +46,7 @@ async function uploadComprovanteFile(
 // Entrada de recurso NFP (admin, coord_geral) — lançamento direto, já executado
 financeiro.post('/geral/entradas', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ valor?: number; finalidade?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ valor?: number; finalidade?: string }>().catch(() => ({} as any))
   const { valor, finalidade } = body
 
   if (!valor || valor <= 0) return errorResponse(c, 422, 'Informe um valor positivo.')
@@ -159,10 +159,10 @@ financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo
 
   if (!valor || valor <= 0) return errorResponse(c, 422, 'Informe um valor positivo.')
   if (!finalidade) return errorResponse(c, 422, 'Informe a finalidade/prestação de contas do pagamento.')
-  if (!(comprovanteBancario instanceof File)) {
+  if (!isFormDataFile(comprovanteBancario)) {
     return errorResponse(c, 422, 'Comprovante bancário é obrigatório para toda saída financeira.')
   }
-  if (!(comprovanteFiscal instanceof File)) {
+  if (!isFormDataFile(comprovanteFiscal)) {
     return errorResponse(c, 422, 'Comprovante fiscal é obrigatório para toda saída financeira.')
   }
 
@@ -215,7 +215,7 @@ financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo
 // Solicitar repasse Geral -> Núcleo (admin, coord_geral)
 financeiro.post('/repasses/geral-nucleo', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ nucleo_id?: number; valor?: number; finalidade?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ nucleo_id?: number; valor?: number; finalidade?: string }>().catch(() => ({} as any))
   const { nucleo_id, valor, finalidade } = body
 
   if (!nucleo_id || !valor || valor <= 0) return errorResponse(c, 422, 'Informe nucleo_id e valor positivo.')
@@ -244,7 +244,7 @@ financeiro.post('/repasses/geral-nucleo', requireRole('admin', 'coord_geral'), a
 // Solicitar repasse Núcleo -> Projeto (coord_nucleo do respectivo núcleo, coord_geral, admin)
 financeiro.post('/repasses/nucleo-projeto', requireRole('admin', 'coord_geral', 'coord_nucleo'), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ projeto_id?: number; valor?: number; finalidade?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ projeto_id?: number; valor?: number; finalidade?: string }>().catch(() => ({} as any))
   const { projeto_id, valor, finalidade } = body
 
   if (!projeto_id || !valor || valor <= 0) return errorResponse(c, 422, 'Informe projeto_id e valor positivo.')
@@ -311,7 +311,7 @@ financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'coord_geral'), as
 financeiro.post('/repasses/:id/rejeitar', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
-  const body = await c.req.json<{ motivo?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ motivo?: string }>().catch(() => ({} as any))
 
   const lancamento = await c.env.DB.prepare('SELECT * FROM financeiro_lancamentos WHERE id = ?').bind(id).first<any>()
   if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
@@ -346,7 +346,7 @@ financeiro.post('/repasses/:id/executar', requireRole('admin'), async (c) => {
 
   const formData = await c.req.formData().catch(() => null)
   const comprovanteBancario = formData?.get('comprovante_bancario')
-  if (!(comprovanteBancario instanceof File)) {
+  if (!isFormDataFile(comprovanteBancario)) {
     return errorResponse(c, 422, 'Comprovante bancário é obrigatório para executar o repasse.')
   }
 

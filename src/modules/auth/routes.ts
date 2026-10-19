@@ -25,7 +25,7 @@ async function loadUserRoles(db: D1Database, userId: number): Promise<UserRoleRo
 
 // ===== LOGIN (público) =====
 auth.post('/login', async (c) => {
-  const body = await c.req.json<{ email?: string; senha?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ email?: string; senha?: string }>().catch(() => ({} as any))
   const { email, senha } = body
   if (!email || !senha) {
     return errorResponse(c, 422, 'Informe e-mail e senha.')
@@ -110,7 +110,7 @@ auth.post('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), asyn
     senha?: string
     role?: Role
     nucleo_id?: number | null
-  }>().catch(() => ({}))
+  }>().catch(() => ({} as any))
 
   const { nome, email, senha, role, nucleo_id } = body
 

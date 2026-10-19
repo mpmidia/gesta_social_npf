@@ -39,7 +39,7 @@ nucleos.get('/', async (c) => {
 // ===== CRIAR NÚCLEO (admin, coord_geral) =====
 nucleos.post('/', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ nome?: string; descricao?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ nome?: string; descricao?: string }>().catch(() => ({} as any))
   const { nome, descricao } = body
 
   if (!nome) {
@@ -103,7 +103,7 @@ nucleos.get('/:nucleoId', requireNucleoAccess(), async (c) => {
 nucleos.put('/:nucleoId', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
   const nucleoId = Number(c.req.param('nucleoId'))
-  const body = await c.req.json<{ nome?: string; descricao?: string; ativo?: boolean }>().catch(() => ({}))
+  const body = await c.req.json<{ nome?: string; descricao?: string; ativo?: boolean }>().catch(() => ({} as any))
 
   const nucleo = await c.env.DB.prepare('SELECT id FROM nucleos WHERE id = ?').bind(nucleoId).first()
   if (!nucleo) return errorResponse(c, 404, 'Núcleo não encontrado.')
@@ -123,7 +123,7 @@ nucleos.put('/:nucleoId', requireRole('admin', 'coord_geral'), async (c) => {
 nucleos.post('/:nucleoId/coordenadores', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
   const nucleoId = Number(c.req.param('nucleoId'))
-  const body = await c.req.json<{ user_id?: number }>().catch(() => ({}))
+  const body = await c.req.json<{ user_id?: number }>().catch(() => ({} as any))
   const { user_id } = body
 
   if (!user_id) return errorResponse(c, 422, 'Informe user_id do coordenador.')
