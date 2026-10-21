@@ -654,8 +654,12 @@ async function verComprovantes(lancamentoId) {
 // ============================================================
 
 async function renderFinanceiroGeral() {
-  const { data: saldoData } = await axios.get('/api/financeiro/geral/saldo');
-  const { data: lancamentosData } = await axios.get('/api/financeiro/geral/lancamentos');
+  const [{ data: saldoData }, { data: lancamentosData }, { data: importacoesData }] = await Promise.all([
+    axios.get('/api/financeiro/geral/saldo'),
+    axios.get('/api/financeiro/geral/lancamentos'),
+    axios.get('/api/financeiro/geral/importacoes')
+  ]);
+  const importacoes = importacoesData.data;
 
   document.getElementById('page-content').innerHTML = `
     <div class="gs-card p-5 mb-6 flex items-center justify-between flex-wrap gap-4">
@@ -663,9 +667,36 @@ async function renderFinanceiroGeral() {
         <p class="text-sm text-gray-500 mb-1">Saldo Geral Disponível</p>
         <p class="text-3xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>
       </div>
-      <button onclick="openLancarEntradaModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
-        <i class="fas fa-plus mr-1"></i> Lançar Entrada NFP
+      <button onclick="openImportarNfpModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
+        <i class="fas fa-file-import mr-1"></i> Importar planilha da NFP
       </button>
+    </div>
+    <div class="gs-card p-5 mb-6">
+      <h3 class="font-semibold text-gray-700 mb-1">Importações da planilha NFP</h3>
+      <p class="text-xs text-gray-500 mb-3">O Painel Geral só recebe entradas pela importação da planilha de créditos exportada do site da Nota Fiscal Paulista. Reimportar o mesmo arquivo atualizado não duplica lançamentos já processados.</p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr class="text-left text-gray-500 border-b">
+            <th class="py-2 pr-3">Data</th><th class="py-2 pr-3">Arquivo</th><th class="py-2 pr-3">Linhas no arquivo</th>
+            <th class="py-2 pr-3">Elegíveis</th><th class="py-2 pr-3">Novas</th><th class="py-2 pr-3">Duplicadas</th>
+            <th class="py-2 pr-3">Ignoradas</th><th class="py-2 pr-3">Valor importado</th><th class="py-2 pr-3">Por</th>
+          </tr></thead>
+          <tbody>
+            ${importacoes.map(i => `
+              <tr class="border-b last:border-0">
+                <td class="py-2 pr-3 whitespace-nowrap">${fmtDate(i.created_at)}</td>
+                <td class="py-2 pr-3">${i.nome_arquivo}</td>
+                <td class="py-2 pr-3">${i.total_linhas_arquivo}</td>
+                <td class="py-2 pr-3">${i.linhas_elegiveis}</td>
+                <td class="py-2 pr-3 text-emerald-600 font-medium">${i.linhas_novas}</td>
+                <td class="py-2 pr-3 text-amber-600">${i.linhas_duplicadas}</td>
+                <td class="py-2 pr-3 text-gray-400">${i.linhas_ignoradas_zero_ou_a_calcular}</td>
+                <td class="py-2 pr-3 font-medium">${fmtMoney(i.valor_total_importado)}</td>
+                <td class="py-2 pr-3">${i.importado_por_nome}</td>
+              </tr>`).join('') || '<tr><td colspan="9" class="py-3 text-gray-400 text-sm">Nenhuma importação realizada ainda.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
     </div>
     <div class="gs-card p-5">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Geral</h3>
@@ -673,34 +704,49 @@ async function renderFinanceiroGeral() {
     </div>`;
 }
 
-function openLancarEntradaModal() {
+function openImportarNfpModal() {
   openModal(`
-    <h3 class="text-lg font-bold text-gray-800 mb-4">Lançar Entrada da NFP</h3>
-    <form id="form-entrada" class="space-y-3">
+    <h3 class="text-lg font-bold text-gray-800 mb-4">Importar planilha da Nota Fiscal Paulista</h3>
+    <p class="text-sm text-gray-600 mb-3">Envie o arquivo <strong>.csv</strong> exportado da "Consulta de Créditos" no site da NFP. Linhas com situação "A Calcular" ou crédito zerado são ignoradas automaticamente. Linhas já importadas anteriormente (mesmo arquivo reexportado em outro mês) não são lançadas novamente.</p>
+    <form id="form-importar-nfp" class="space-y-3">
       <div>
-        <label class="block text-sm text-gray-600 mb-1">Valor (R$)</label>
-        <input name="valor" type="number" step="0.01" min="0.01" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
-      </div>
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">Finalidade / Observação</label>
-        <input name="finalidade" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" placeholder="Repasse trimestral NFP" />
+        <label class="block text-sm text-gray-600 mb-1">Arquivo CSV</label>
+        <input name="arquivo" type="file" accept=".csv,.txt" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Lançar</button>
+        <button type="submit" id="btn-importar-nfp" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Importar</button>
       </div>
     </form>`);
 
-  document.getElementById('form-entrada').addEventListener('submit', async (e) => {
+  document.getElementById('form-importar-nfp').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const body = Object.fromEntries(new FormData(e.target).entries());
-    body.valor = parseFloat(body.valor);
+    const btn = document.getElementById('btn-importar-nfp');
+    const formData = new FormData(e.target);
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Importando...';
     try {
-      await axios.post('/api/financeiro/geral/entradas', body);
+      const { data } = await axios.post('/api/financeiro/geral/importar-nfp', formData);
       closeModal();
-      toast('Entrada lançada com sucesso.');
+      const r = data.data;
+      openModal(`
+        <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-circle-check text-emerald-500 mr-1"></i>Importação concluída</h3>
+        <ul class="text-sm text-gray-700 space-y-1 mb-4">
+          <li>Linhas no arquivo: <strong>${r.totalLinhasArquivo}</strong></li>
+          <li>Linhas elegíveis (com crédito definido): <strong>${r.linhasElegiveis}</strong></li>
+          <li class="text-emerald-600">Lançadas agora (novas): <strong>${r.linhasNovas}</strong></li>
+          <li class="text-amber-600">Já existiam (duplicadas, ignoradas): <strong>${r.linhasDuplicadas}</strong></li>
+          <li class="text-gray-400">Ignoradas (zeradas / "A Calcular"): <strong>${r.linhasIgnoradas}</strong></li>
+          <li class="font-semibold pt-1">Valor total lançado: ${fmtMoney(r.valorTotalImportado)}</li>
+        </ul>
+        ${r.mensagem ? `<p class="text-sm text-gray-500 mb-4">${r.mensagem}</p>` : ''}
+        <div class="flex justify-end"><button onclick="closeModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Fechar</button></div>`);
       renderFinanceiroGeral();
-    } catch (err) { toast(apiErr(err), 'error'); }
+    } catch (err) {
+      toast(apiErr(err), 'error');
+      btn.disabled = false;
+      btn.innerHTML = 'Importar';
+    }
   });
 }
 
@@ -858,9 +904,12 @@ async function validarColaborador(id) {
 // USUÁRIOS & PERMISSÕES (admin/coord_geral)
 // ============================================================
 
+let USUARIOS_CACHE = [];
+
 async function renderUsuarios() {
   const { data } = await axios.get('/api/auth/usuarios');
   const usuarios = data.data;
+  USUARIOS_CACHE = usuarios;
 
   document.getElementById('page-content').innerHTML = `
     <div class="flex justify-between items-center mb-4">
@@ -881,9 +930,13 @@ async function renderUsuarios() {
                 <td class="py-2 pr-3">${u.email}</td>
                 <td class="py-2 pr-3">${(u.roles || []).map(r => `<span class="text-xs bg-gray-100 px-2 py-0.5 rounded-full mr-1">${ROLE_LABELS[r.role]}${r.escopo_id ? ' #' + r.escopo_id : ''}</span>`).join('')}</td>
                 <td class="py-2 pr-3">${u.ativo ? '<span class="text-emerald-600">Ativo</span>' : '<span class="text-red-500">Inativo</span>'}</td>
-                <td class="py-2 pr-3 space-x-2">
+                <td class="py-2 pr-3 space-x-2 whitespace-nowrap">
+                  ${isGlobal() ? `<button onclick="openEditUsuarioModal(${u.id})" class="text-gray-600 hover:underline text-xs"><i class="fas fa-pen mr-0.5"></i>Editar</button>` : ''}
+                  ${isAdmin() ? `<button onclick="resetarSenhaUsuario(${u.id})" class="text-amber-600 hover:underline text-xs"><i class="fas fa-key mr-0.5"></i>Resetar senha</button>` : ''}
                   ${isAdmin() && !u.roles.some(r => r.role === 'admin') ? `<button onclick="promoverAdmin(${u.id})" class="text-blue-600 hover:underline text-xs">Promover a Admin</button>` : ''}
-                  ${isAdmin() && u.ativo ? `<button onclick="desativarUsuario(${u.id})" class="text-red-600 hover:underline text-xs">Desativar</button>` : ''}
+                  ${isAdmin() && u.ativo ? `<button onclick="desativarUsuario(${u.id})" class="text-orange-600 hover:underline text-xs">Desativar</button>` : ''}
+                  ${isAdmin() && !u.ativo ? `<button onclick="reativarUsuario(${u.id})" class="text-emerald-600 hover:underline text-xs">Reativar</button>` : ''}
+                  ${isAdmin() ? `<button onclick="excluirUsuario(${u.id})" class="text-red-600 hover:underline text-xs"><i class="fas fa-trash mr-0.5"></i>Excluir</button>` : ''}
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -954,6 +1007,68 @@ function openCreateUsuarioModal() {
   });
 }
 
+function openEditUsuarioModal(id) {
+  const usuario = USUARIOS_CACHE.find(u => u.id === id);
+  if (!usuario) return;
+  const papelAtual = (usuario.roles || [])[0] || {};
+  const nucleoOptionsPromise = axios.get('/api/nucleos');
+
+  openModal(`
+    <h3 class="text-lg font-bold text-gray-800 mb-4">Editar Usuário</h3>
+    <form id="form-editar-usuario" class="space-y-3">
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Nome</label>
+        <input name="nome" required value="${usuario.nome}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">E-mail</label>
+        <input name="email" type="email" required value="${usuario.email}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Papel</label>
+        <select name="role" id="edit-role-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
+          ${isAdmin() ? `<option value="admin" ${papelAtual.role === 'admin' ? 'selected' : ''}>Administrador</option><option value="coord_geral" ${papelAtual.role === 'coord_geral' ? 'selected' : ''}>Coordenador Geral</option>` : ''}
+          <option value="coord_nucleo" ${papelAtual.role === 'coord_nucleo' ? 'selected' : ''}>Coordenador de Núcleo</option>
+          <option value="articulador" ${papelAtual.role === 'articulador' ? 'selected' : ''}>Articulador</option>
+        </select>
+      </div>
+      <div id="edit-nucleo-field" class="hidden">
+        <label class="block text-sm text-gray-600 mb-1">Núcleo</label>
+        <select name="nucleo_id" id="edit-nucleo-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></select>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Salvar</button>
+      </div>
+    </form>`);
+
+  const roleSelect = document.getElementById('edit-role-select');
+  const nucleoField = document.getElementById('edit-nucleo-field');
+  const nucleoSelect = document.getElementById('edit-nucleo-select');
+
+  nucleoOptionsPromise.then(({ data }) => {
+    nucleoSelect.innerHTML = data.data.map(n => `<option value="${n.id}" ${papelAtual.escopo_id === n.id ? 'selected' : ''}>${n.nome}</option>`).join('');
+  });
+
+  function toggleNucleoField() {
+    nucleoField.classList.toggle('hidden', roleSelect.value !== 'coord_nucleo');
+  }
+  roleSelect.addEventListener('change', toggleNucleoField);
+  toggleNucleoField();
+
+  document.getElementById('form-editar-usuario').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    if (body.nucleo_id) body.nucleo_id = parseInt(body.nucleo_id);
+    try {
+      await axios.put(`/api/auth/usuarios/${id}`, body);
+      closeModal();
+      toast('Usuário atualizado com sucesso.');
+      renderUsuarios();
+    } catch (err) { toast(apiErr(err), 'error'); }
+  });
+}
+
 async function promoverAdmin(id) {
   if (!confirm('Confirma promover este usuário a Administrador?')) return;
   try {
@@ -968,6 +1083,40 @@ async function desativarUsuario(id) {
   try {
     await axios.post(`/api/auth/usuarios/${id}/desativar`);
     toast('Usuário desativado.');
+    renderUsuarios();
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+async function reativarUsuario(id) {
+  if (!confirm('Confirma reativar este usuário?')) return;
+  try {
+    await axios.post(`/api/auth/usuarios/${id}/reativar`);
+    toast('Usuário reativado.');
+    renderUsuarios();
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+async function resetarSenhaUsuario(id) {
+  const usuario = USUARIOS_CACHE.find(u => u.id === id);
+  const novaSenha = prompt(`Digite a nova senha para ${usuario ? usuario.nome : 'o usuário'} (deixe em branco para gerar uma senha aleatória):`);
+  if (novaSenha === null) return; // cancelou
+  try {
+    const { data } = await axios.post(`/api/auth/usuarios/${id}/resetar-senha`, { nova_senha: novaSenha || undefined });
+    openModal(`
+      <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-key mr-1 text-amber-500"></i>Senha redefinida</h3>
+      <p class="text-sm text-gray-600 mb-3">${data.data.message}</p>
+      <p class="text-sm text-gray-600 mb-1">Repasse esta senha ao usuário por um canal seguro — ela não ficará visível novamente:</p>
+      <div class="bg-gray-100 rounded-lg px-3 py-2 font-mono text-sm select-all mb-4">${data.data.senha_temporaria}</div>
+      <div class="flex justify-end"><button onclick="closeModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Entendi</button></div>`);
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+async function excluirUsuario(id) {
+  const usuario = USUARIOS_CACHE.find(u => u.id === id);
+  if (!confirm(`Confirma excluir o usuário "${usuario ? usuario.nome : ''}"? Se ele possuir histórico vinculado (lançamentos, auditoria etc.), o registro será mantido de forma inativa para preservar a rastreabilidade; caso contrário, será excluído permanentemente.`)) return;
+  try {
+    const { data } = await axios.delete(`/api/auth/usuarios/${id}`);
+    toast(data.data.message);
     renderUsuarios();
   } catch (err) { toast(apiErr(err), 'error'); }
 }

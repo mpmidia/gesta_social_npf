@@ -4,6 +4,7 @@ import type { AppDatabase } from '../../platform/db'
 import type { AppBucket } from '../../platform/storage'
 import { errorResponse, okResponse, isFormDataFile } from '../../utils/response'
 import { generateRandomKey } from '../../utils/crypto'
+import { parseCreditosNFP } from '../../utils/csv-nfp'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
 import { requireRole, isGlobalUser, getScopedNucleoIds, isAdmin } from '../../middlewares/rbac'
@@ -44,27 +45,191 @@ async function uploadComprovanteFile(
 }
 
 // ================= PAINEL GERAL =================
+//
+// O Painel Geral NÃO recebe mais lançamentos manuais de entrada — a única
+// forma de lançar entrada no Geral é importando a planilha de créditos
+// exportada do site da Nota Fiscal Paulista (ver rota /geral/importar-nfp
+// abaixo). Isso garante que todo valor lançado no Geral tenha lastro
+// rastreável no arquivo oficial da NFP (CNPJ, nota fiscal, data), em vez
+// de um valor digitado manualmente sem comprovação.
 
-// Entrada de recurso NFP (admin, coord_geral) — lançamento direto, já executado
-financeiro.post('/geral/entradas', requireRole('admin', 'coord_geral'), async (c) => {
+// Importação da planilha de créditos NFP (admin, coord_geral) — cada linha
+// elegível (Créditos > 0 e Situação != "A Calcular") vira um lançamento de
+// entrada no Painel Geral. Deduplicação pelo hash de todos os campos da
+// linha, para permitir reimportar o mesmo arquivo atualizado mês a mês
+// sem duplicar lançamentos já processados.
+financeiro.post('/geral/importar-nfp', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
-  const body = await c.req.json<{ valor?: number; finalidade?: string }>().catch(() => ({} as any))
-  const { valor, finalidade } = body
 
-  if (!valor || valor <= 0) return errorResponse(c, 422, 'Informe um valor positivo.')
+  const formData = await c.req.formData().catch(() => null)
+  if (!formData) return errorResponse(c, 422, 'Envie o arquivo via multipart/form-data.')
 
-  const result = await c.env.DB.prepare(
-    `INSERT INTO financeiro_lancamentos (nivel, tipo, valor, status, finalidade, solicitado_por, executado_por, executado_em)
-     VALUES ('geral', 'entrada_nfp', ?, 'executado', ?, ?, ?, CURRENT_TIMESTAMP)`
+  const arquivo = formData.get('arquivo')
+  if (!isFormDataFile(arquivo)) {
+    return errorResponse(c, 422, 'Envie o arquivo CSV exportado do site da Nota Fiscal Paulista (campo "arquivo").')
+  }
+
+  const nomeArquivo = arquivo.name
+  const extensaoValida = /\.(csv|txt)$/i.test(nomeArquivo)
+  if (!extensaoValida) {
+    return errorResponse(
+      c,
+      422,
+      'Formato de arquivo não suportado. Exporte a planilha do site da NFP em formato CSV (Consulta de Créditos → Exportar) e envie o arquivo .csv.'
+    )
+  }
+
+  const conteudo = await arquivo.text()
+  const resultado = await parseCreditosNFP(conteudo)
+
+  if (resultado.erroFormato) {
+    return errorResponse(c, 422, resultado.erroFormato)
+  }
+
+  if (resultado.linhasElegiveis.length === 0) {
+    // Ainda registra a importação (com zero linhas novas) para ficar no histórico,
+    // mesmo quando o arquivo só contém notas "A Calcular"/zeradas.
+    const importRow = await c.env.DB.prepare(
+      `INSERT INTO financeiro_importacoes_nfp
+       (nome_arquivo, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
+       VALUES (?, ?, 0, 0, 0, ?, 0, ?)`
+    )
+      .bind(nomeArquivo, resultado.totalLinhasArquivo, resultado.linhasIgnoradasZeroOuACalcular, actor.sub)
+      .run()
+
+    await logAudit(c, {
+      userId: actor.sub,
+      acao: 'financeiro.importar_nfp',
+      entidade: 'financeiro_importacoes_nfp',
+      entidadeId: importRow.meta.last_row_id as number,
+      payload: { nomeArquivo, totalLinhasArquivo: resultado.totalLinhasArquivo, linhasNovas: 0 }
+    })
+
+    return okResponse(c, {
+      totalLinhasArquivo: resultado.totalLinhasArquivo,
+      linhasElegiveis: 0,
+      linhasNovas: 0,
+      linhasDuplicadas: 0,
+      linhasIgnoradas: resultado.linhasIgnoradasZeroOuACalcular,
+      valorTotalImportado: 0,
+      mensagem: 'Nenhuma linha elegível encontrada no arquivo (todas estavam zeradas ou com situação "A Calcular").'
+    })
+  }
+
+  // Verifica quais hashes já existem (já importados anteriormente) numa única query.
+  const hashes = resultado.linhasElegiveis.map((l) => l.linhaHash)
+  const placeholders = hashes.map(() => '?').join(',')
+  const { results: existentes } = await c.env.DB.prepare(
+    `SELECT linha_hash FROM financeiro_creditos_nfp WHERE linha_hash IN (${placeholders})`
   )
-    .bind(valor, finalidade ?? 'Repasse recebido do programa Nota Fiscal Paulista', actor.sub, actor.sub)
+    .bind(...hashes)
+    .all<{ linha_hash: string }>()
+  const hashesExistentes = new Set((existentes ?? []).map((r) => r.linha_hash))
+
+  const linhasNovas = resultado.linhasElegiveis.filter((l) => !hashesExistentes.has(l.linhaHash))
+  const linhasDuplicadas = resultado.linhasElegiveis.length - linhasNovas.length
+  const valorTotal = linhasNovas.reduce((acc, l) => acc + l.creditos, 0)
+
+  // 1) Cria o registro da importação primeiro (precisamos do id para vincular os créditos).
+  const importRow = await c.env.DB.prepare(
+    `INSERT INTO financeiro_importacoes_nfp
+     (nome_arquivo, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      nomeArquivo,
+      resultado.totalLinhasArquivo,
+      resultado.linhasElegiveis.length,
+      linhasNovas.length,
+      linhasDuplicadas,
+      resultado.linhasIgnoradasZeroOuACalcular,
+      valorTotal,
+      actor.sub
+    )
     .run()
+  const importacaoId = importRow.meta.last_row_id as number
 
-  const id = result.meta.last_row_id as number
+  // 2) Para cada linha nova: insere um lançamento 'entrada_nfp' no Geral +
+  // o registro de crédito vinculado, de forma atômica por linha (evita
+  // lançamento financeiro "órfão" sem o registro de dedup correspondente).
+  for (const linha of linhasNovas) {
+    const finalidade = `NFP — ${linha.emitente} (CNPJ ${linha.cnpjEmitente}, NF ${linha.numeroNf}, emissão ${linha.dataEmissao})`
 
-  await logAudit(c, { userId: actor.sub, acao: 'financeiro.entrada_nfp.lancar', entidade: 'financeiro_lancamentos', entidadeId: id, payload: { valor } })
+    const insertLancamento = await c.env.DB.prepare(
+      `INSERT INTO financeiro_lancamentos (nivel, tipo, valor, status, finalidade, solicitado_por, executado_por, executado_em)
+       VALUES ('geral', 'entrada_nfp', ?, 'executado', ?, ?, ?, CURRENT_TIMESTAMP)`
+    )
+      .bind(linha.creditos, finalidade, actor.sub, actor.sub)
+      .run()
+    const lancamentoId = insertLancamento.meta.last_row_id as number
 
-  return okResponse(c, { id, valor, status: 'executado' }, 201)
+    try {
+      await c.env.DB.prepare(
+        `INSERT INTO financeiro_creditos_nfp
+         (linha_hash, cnpj_emitente, emitente, numero_nf, data_emissao, valor_nf, data_registro, creditos, situacao_credito, lancamento_id, importacao_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(
+          linha.linhaHash,
+          linha.cnpjEmitente,
+          linha.emitente,
+          linha.numeroNf,
+          linha.dataEmissao,
+          linha.valorNf,
+          linha.dataRegistro,
+          linha.creditos,
+          linha.situacaoCredito,
+          lancamentoId,
+          importacaoId
+        )
+        .run()
+    } catch (err: any) {
+      // Proteção contra condição de corrida: se outra importação concorrente
+      // inseriu o mesmo linha_hash entre a checagem de duplicidade acima e
+      // este INSERT, a UNIQUE KEY rejeita — desfazemos o lançamento órfão
+      // que acabamos de criar para não deixar um registro financeiro sem
+      // o vínculo de dedup correspondente.
+      await c.env.DB.prepare('DELETE FROM financeiro_lancamentos WHERE id = ?').bind(lancamentoId).run()
+      if (err?.code === 'ER_DUP_ENTRY' || err?.errno === 1062) {
+        continue
+      }
+      throw err
+    }
+  }
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'financeiro.importar_nfp',
+    entidade: 'financeiro_importacoes_nfp',
+    entidadeId: importacaoId,
+    payload: {
+      nomeArquivo,
+      totalLinhasArquivo: resultado.totalLinhasArquivo,
+      linhasNovas: linhasNovas.length,
+      linhasDuplicadas,
+      valorTotal
+    }
+  })
+
+  return okResponse(c, {
+    totalLinhasArquivo: resultado.totalLinhasArquivo,
+    linhasElegiveis: resultado.linhasElegiveis.length,
+    linhasNovas: linhasNovas.length,
+    linhasDuplicadas,
+    linhasIgnoradas: resultado.linhasIgnoradasZeroOuACalcular,
+    valorTotalImportado: valorTotal
+  }, 201)
+})
+
+// Histórico de importações realizadas (admin, coord_geral)
+financeiro.get('/geral/importacoes', requireRole('admin', 'coord_geral'), async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT i.*, u.nome AS importado_por_nome
+     FROM financeiro_importacoes_nfp i
+     JOIN users u ON u.id = i.importado_por
+     ORDER BY i.created_at DESC`
+  ).all()
+  return okResponse(c, results)
 })
 
 financeiro.get('/geral/saldo', requireRole('admin', 'coord_geral'), async (c) => {
