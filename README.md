@@ -14,6 +14,9 @@
 ✅ **Testado localmente contra MySQL real** (MariaDB), com todas as regras de negócio revalidadas após a migração
 ✅ **Deploy em produção na Hostinger concluído** — app Node.js ativo, GitHub-integrado (auto-deploy a cada push em `main`), domínio `nfp.social.br` (DNS/HTTPS pendentes de propagação)
 ✅ **Ciclo de vida de comprovantes implementado** (download único + expiração em 30 dias — ver seção dedicada abaixo)
+✅ **Gestão completa de usuários** (admin cria/edita/exclui/reseta senha; exclusão inteligente faz soft-delete quando há histórico vinculado — ver seção dedicada abaixo)
+✅ **Importação da planilha da Nota Fiscal Paulista no Financeiro Geral**, com deduplicação e ignorando linhas "A Calcular"/zeradas (ver seção dedicada abaixo)
+✅ **Lançamentos manuais no Financeiro Geral** (entrada/saída avulsa, com edição e cancelamento auditados — ver seção dedicada abaixo)
 ⚠️ **E-mail e WhatsApp em modo STUB** (simulação em log — ver `src/modules/comunicacao/providers.ts`)
 ⚠️ **Senha padrão do admin de seed (`admin123`) ainda ativa em produção** — trocar antes de uso real
 ⚠️ **Confirmar se as variáveis de ambiente `R2_*` estão configuradas no painel da Hostinger** — sem elas, upload/download de comprovantes e galeria falha
@@ -259,3 +262,22 @@ Validado localmente, de ponta a ponta, contra MySQL real (MariaDB) e um storage 
 - RBAC aplicado em middleware de rota, nunca apenas no frontend.
 - Isolamento de dados por núcleo garantido nas queries SQL (nunca por filtro client-side).
 - Nenhuma credencial (MySQL, R2, JWT_SECRET) é commitada no repositório — todas vêm de variáveis de ambiente (`.env` local / hPanel em produção).
+
+## Gestão de Usuários (novo)
+- **Admin**: cria, edita, exclui e reseta senha de qualquer usuário (`POST/PUT/DELETE /api/auth/usuarios/:id`, `POST /api/auth/usuarios/:id/resetar-senha`, `POST /api/auth/usuarios/:id/reativar`).
+- **Coord. Geral**: cria/edita apenas `coord_nucleo` e `articulador` (nunca admin/coord_geral).
+- **Exclusão inteligente**: se o usuário tiver histórico vinculado (lançamentos, comprovantes, auditoria etc. — 13 tabelas verificadas), o sistema faz **soft-delete** (`excluido_em` + `ativo=0`, bloqueia login, some da listagem, mas preserva o registro para auditoria); sem histórico, exclui definitivamente.
+- **Reset de senha**: admin define uma senha ou o sistema gera uma temporária exibida uma única vez na tela.
+
+## Importação da planilha NFP (novo)
+- `POST /api/financeiro/geral/importar-nfp` (admin, coord_geral): recebe o CSV exportado da "Consulta de Créditos" do site da NFP.
+- Parser nativo (sem `xlsx`/`exceljs` — ambos com vulnerabilidades sem correção disponível), auditável, em `src/utils/csv-nfp.ts`.
+- Ignora automaticamente linhas com crédito zerado ou situação "A Calcular".
+- Deduplicação por hash SHA-256 de todos os campos da linha + `UNIQUE KEY` no banco — permite reimportar o mesmo arquivo atualizado mês a mês sem duplicar lançamentos.
+- Histórico de importações em `GET /api/financeiro/geral/importacoes`.
+
+## Lançamentos manuais no Financeiro Geral (novo)
+- `POST /api/financeiro/geral/lancamentos-manuais` (admin, coord_geral): registra entrada ou saída avulsa (ex.: estorno, taxa bancária, doação direta), com finalidade/justificativa obrigatória.
+- `PUT /.../lancamentos-manuais/:id` (admin, coord_geral): edita valor/finalidade — bloqueado para lançamentos vindos da importação NFP ou repasses.
+- `DELETE /.../lancamentos-manuais/:id` (somente admin): soft-delete via `status='cancelado'`, preservando o registro para auditoria mas excluindo do cálculo de saldo.
+- Toda saída (nova ou editada) valida saldo suficiente antes de executar.
