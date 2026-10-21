@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../types/bindings'
+import type { AppDatabase } from '../../platform/db'
+import type { AppBucket } from '../../platform/storage'
 import { errorResponse, okResponse, isFormDataFile } from '../../utils/response'
 import { generateRandomKey } from '../../utils/crypto'
 import { logAudit } from '../../middlewares/audit'
@@ -25,13 +27,13 @@ function userCanManageSaidaProjeto(user: any, nucleoId: number): boolean {
   return user.roles?.some((r: any) => r.role === 'coord_nucleo' && r.escopo_id === nucleoId)
 }
 
-async function getNucleoIdFromProjeto(db: D1Database, projetoId: number): Promise<number | null> {
+async function getNucleoIdFromProjeto(db: AppDatabase, projetoId: number): Promise<number | null> {
   const row = await db.prepare('SELECT nucleo_id FROM projetos WHERE id = ?').bind(projetoId).first<{ nucleo_id: number }>()
   return row?.nucleo_id ?? null
 }
 
 async function uploadComprovanteFile(
-  r2: R2Bucket,
+  r2: AppBucket,
   lancamentoId: number,
   tipo: 'bancario' | 'fiscal',
   file: File

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { setCookie, deleteCookie } from 'hono/cookie'
 import type { AppEnv, Role } from '../../types/bindings'
+import type { AppDatabase } from '../../platform/db'
 import { hashPassword, verifyPassword } from '../../utils/crypto'
 import { createToken, COOKIE_NAME } from '../../utils/jwt'
 import { errorResponse, okResponse } from '../../utils/response'
@@ -15,7 +16,7 @@ interface UserRoleRow {
   escopo_id: number | null
 }
 
-async function loadUserRoles(db: D1Database, userId: number): Promise<UserRoleRow[]> {
+async function loadUserRoles(db: AppDatabase, userId: number): Promise<UserRoleRow[]> {
   const { results } = await db
     .prepare('SELECT role, escopo_id FROM user_roles WHERE user_id = ?')
     .bind(userId)

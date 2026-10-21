@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../types/bindings'
+import type { AppDatabase } from '../../platform/db'
 import { errorResponse, okResponse } from '../../utils/response'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
@@ -73,7 +74,7 @@ colaboradores.post('/gestao/:id/validar', requireRole('admin', 'coord_geral', 'c
 // ===== FORMULÁRIO PÚBLICO (sem login) =====
 // Montado separadamente em /api/public/colaborador dentro de publico/routes.ts
 export async function criarColaboradorPublico(
-  db: D1Database,
+  db: AppDatabase,
   data: { nucleo_id?: number; projeto_id?: number; nome: string; cpf: string; whatsapp: string; status_portal_fazenda: string }
 ) {
   if (!isValidCpf(data.cpf)) {
