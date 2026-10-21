@@ -1,6 +1,9 @@
 -- ============================================================
 -- Views de saldo (calculadas dinamicamente, nunca armazenadas
 -- como campo mutável — sempre derivadas do ledger imutável)
+--
+-- Sintaxe praticamente idêntica ao SQLite original; MySQL também
+-- suporta DROP VIEW IF EXISTS e subqueries escalares em SELECT.
 -- ============================================================
 
 DROP VIEW IF EXISTS saldo_geral;

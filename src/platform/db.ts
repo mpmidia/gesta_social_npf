@@ -125,7 +125,17 @@ export function getPool(): mysql.Pool {
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
-      dateStrings: true
+      dateStrings: true,
+      charset: 'utf8mb4',
+      // Importante: o código de negócio foi escrito originalmente para o
+      // D1 (SQLite), que retorna valores numéricos (REAL) como `number`
+      // nativo do JS. O mysql2, por padrão, retorna colunas DECIMAL/NEWDECIMAL
+      // (usadas aqui para valores monetários) como `string`, para não perder
+      // precisão. Isso quebraria silenciosamente comparações e `.toFixed()`
+      // espalhados pelas rotas financeiras. `decimalNumbers: true` faz o driver
+      // converter essas colunas para `number` automaticamente, preservando o
+      // comportamento esperado pelas rotas sem precisar alterá-las.
+      decimalNumbers: true
     })
   }
   return pool

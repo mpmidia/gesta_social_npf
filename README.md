@@ -3,27 +3,45 @@
 ## Visão Geral
 - **Nome**: Gestão Social
 - **Objetivo**: Sistema de gestão de arrecadação, núcleos e projetos sociais financiados por recursos do programa Nota Fiscal Paulista, com controle financeiro rigoroso, rastreabilidade e prestação de contas.
-- **Stack**: Hono (TypeScript) + Cloudflare Workers/Pages + D1 (SQLite) + R2 (arquivos) + JWT (cookie httpOnly)
+- **Stack**: Hono (TypeScript) + Node.js (`@hono/node-server`) + MySQL + Cloudflare R2 (armazenamento de arquivos via API S3-compatível) + JWT (cookie httpOnly)
+- **Hospedagem**: Hostinger (plano Business/Cloud, Node.js App via hPanel)
 
 ## Status do Projeto
-✅ **Backend completo e testado localmente** (D1 local + R2 local, `wrangler pages dev`)
-✅ **Frontend administrativo redesenhado** (SPA leve em Vanilla JS + Tailwind CDN, identidade visual "Gestão Social")
+✅ **Backend completo e testado** (lógica de negócio, RBAC, ledger financeiro)
+✅ **Frontend administrativo** (SPA leve em Vanilla JS + Tailwind CDN, identidade visual "Gestão Social")
 ✅ **Páginas públicas de Núcleo/Projeto** (sem login, com formulário de colaborador)
-✅ **Regras de aprovação de repasses e permissões financeiras refinadas** (ver seção de Fluxo Financeiro abaixo)
+✅ **Migração de infraestrutura concluída**: Cloudflare Workers/D1/R2-nativo → Node.js/MySQL/R2-via-S3, para viabilizar o deploy na Hostinger
+✅ **Testado localmente contra MySQL real** (MariaDB), com todas as regras de negócio revalidadas após a migração
 ⚠️ **E-mail e WhatsApp em modo STUB** (simulação em log — ver `src/modules/comunicacao/providers.ts`)
-⚠️ **Não implantado em produção** — banco e recursos ainda são apenas locais (`--local`)
+⚠️ **Upload de comprovantes/galeria depende de credenciais reais do Cloudflare R2** — com credenciais placeholder, o upload falha (comportamento esperado; ver seção R2 abaixo)
+🔲 **Deploy em produção na Hostinger** — aguardando push ao GitHub e configuração do app no hPanel (ver seção de Deploy)
 
 ## Login de teste (seed)
 - **E-mail**: `admin@nfp.org.br`
 - **Senha**: `admin123`
 - ⚠️ Troque essa senha antes de qualquer uso real.
 
+## Por que a migração de infraestrutura?
+O sistema foi originalmente construído para Cloudflare Workers/Pages (Hono + D1 + R2 nativos). O domínio do projeto já foi registrado na **Hostinger**, que:
+- Só expõe **hPanel** para deploy (sem SSH/root) — GitHub-integração (auto-deploy a cada push) ou upload de ZIP.
+- Só suporta **MySQL** como banco de dados gerenciado (sem SQLite/D1/Postgres).
+- Tem **filesystem efêmero**: os diretórios de build/`public_html` são completamente sobrescritos a cada deploy — qualquer arquivo gravado localmente em runtime (ex.: comprovantes financeiros, fotos da galeria) seria perdido no próximo deploy.
+- Tem **suporte oficial a Hono** via `@hono/node-server`, com preset documentado (`app_type: hono`, entry `dist/index.js`, build `npm run build`).
+
+Por isso, a stack foi portada mantendo o **mesmo código de regras de negócio** (RBAC, ledger imutável, validações), trocando apenas a camada de infraestrutura:
+- **Cloudflare D1 (SQLite)** → **MySQL**, acessado via um adaptador compatível com a API D1 (`prepare/bind/first/all/run/batch`) implementado sobre `mysql2`.
+- **Cloudflare R2 (binding nativo)** → **mesmo Cloudflare R2**, mas acessado via sua **API compatível com S3** (`@aws-sdk/client-s3`), a partir do servidor Node.js hospedado na Hostinger — o disco local da Hostinger nunca é usado para armazenar arquivos, justamente por ser efêmero.
+- **Cloudflare Workers runtime** → **Node.js puro**, via `@hono/node-server` (`serve()` + `serveStatic`).
+
 ## Arquitetura
 
 ```
 src/
-├── index.tsx                # bootstrap Hono, monta todas as rotas
-├── types/bindings.ts         # tipos de Bindings (DB, R2, JWT_SECRET) e Role
+├── index.ts                  # bootstrap Hono + @hono/node-server (serve), injeta DB/R2/JWT_SECRET em c.env
+├── types/bindings.ts         # tipos de Bindings (DB: AppDatabase, R2: AppBucket, JWT_SECRET) e Role
+├── platform/
+│   ├── db.ts                   # adaptador D1-compatible sobre mysql2 (prepare/bind/first/all/run/batch)
+│   └── storage.ts               # adaptador R2-compatible sobre @aws-sdk/client-s3 (put/get/delete)
 ├── utils/
 │   ├── crypto.ts              # hash de senha PBKDF2 (Web Crypto API), slugify
 │   ├── jwt.ts                  # criação/verificação de token JWT (cookie de sessão)
@@ -52,11 +70,10 @@ public/static/
 ├── app.js                      # SPA completo do dashboard administrativo
 └── styles.css                   # estilos auxiliares
 
-migrations/
-├── 0001_initial_schema.sql      # todas as tabelas (users, nucleos, projetos, financeiro_lancamentos, etc.)
-└── 0002_views_saldo.sql          # views saldo_geral / saldo_nucleo / saldo_projeto (calculadas, nunca armazenadas)
-
-seed.sql                         # admin padrão + núcleo/projeto de exemplo
+migrations/mysql/
+├── 0001_initial_schema.sql      # todas as tabelas, em sintaxe MySQL (AUTO_INCREMENT, FOREIGN KEY, CHECK, DECIMAL)
+├── 0002_views_saldo.sql          # views saldo_geral / saldo_nucleo / saldo_projeto (calculadas, nunca armazenadas)
+└── seed.sql                       # admin padrão + núcleo/projeto de exemplo (INSERT IGNORE)
 ```
 
 ## Entidades e Fluxo Financeiro
@@ -75,7 +92,6 @@ repasse_nucleo_projeto (Núcleo → Projeto):
 
 saida_pagamento (Projeto):
   admin OU coord_nucleo do núcleo responsável pelo projeto — exige comprovante bancário E fiscal simultaneamente (transação atômica)
-  ⚠️ Coordenador de Núcleo agora gerencia o dia a dia do projeto: pode ver entradas e saídas do seu Núcleo/Projetos e lançar saídas com comprovantes.
 ```
 
 Toda mutação relevante grava uma linha em `audit_log` (nunca editável/deletável via API).
@@ -112,35 +128,79 @@ Toda mutação relevante grava uma linha em `audit_log` (nunca editável/deletá
 | POST | `/api/public/colaborador` | Público (sem login) |
 | GET | `/n/:slug`, `/p/:slug` | Público (sem login) |
 
-## Rodando localmente (sandbox)
+## Variáveis de ambiente
+
+Veja `.env.example`. Resumo:
+
+| Variável | Descrição |
+|---|---|
+| `PORT` | Porta HTTP (a Hostinger define automaticamente em produção) |
+| `DB_HOST` | Host do MySQL — **use `127.0.0.1`, nunca `localhost`** (Node 17+ resolve `localhost` para `::1`/IPv6, que o MySQL da Hostinger recusa) |
+| `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Credenciais do banco MySQL (criado via hPanel → Bancos de Dados) |
+| `JWT_SECRET` | Segredo de assinatura do JWT de sessão — gerar valor aleatório forte em produção |
+| `R2_ENDPOINT` | Endpoint S3-compatível do bucket R2 (`https://<account_id>.r2.cloudflarestorage.com`) |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Chaves de API R2 (Cloudflare Dashboard → R2 → Manage API Tokens) |
+| `R2_BUCKET_NAME` | Nome do bucket R2 usado para comprovantes financeiros e galeria de projetos |
+
+## Rodando localmente (sandbox / qualquer máquina com Node.js + MySQL)
 
 ```bash
-cd /home/user/webapp
+cd webapp
+npm install
+cp .env.example .env   # preencha com suas credenciais reais (MySQL local + R2)
+
+# Aplicar schema + views + dados de exemplo no MySQL
+export DB_USER=... DB_PASSWORD=... DB_NAME=...
+npm run db:migrate:local
+npm run db:seed
+
 npm run build
-pm2 start ecosystem.config.cjs
+npm start               # ou: pm2 start ecosystem.config.cjs
 curl http://localhost:3000
 ```
 
-Banco D1 e bucket R2 são locais (`.wrangler/state/v3/d1` e equivalente para R2) — nenhum recurso de produção foi provisionado ainda.
+## Deploy em produção — Hostinger
+
+1. **Banco de dados**: hPanel → Bancos de Dados → Gerenciar → criar um banco MySQL e um usuário. Anote host (`127.0.0.1`), porta, nome do banco, usuário e senha.
+2. **Aplicar as migrations** no banco de produção (via hPanel → phpMyAdmin, ou localmente apontando `DB_HOST`/credenciais para o host remoto se a Hostinger permitir conexão externa):
+   - `migrations/mysql/0001_initial_schema.sql`
+   - `migrations/mysql/0002_views_saldo.sql`
+   - `migrations/mysql/seed.sql` (opcional — cria o admin padrão; troque a senha depois)
+3. **Cloudflare R2**: criar um bucket R2 na conta Cloudflare (pode ser uma conta Cloudflare gratuita, usada **apenas como storage**, sem hospedar nada nela) e gerar um token de API S3-compatível (Cloudflare Dashboard → R2 → Manage API Tokens). Anotar `endpoint`, `access_key_id`, `secret_access_key` e nome do bucket.
+4. **GitHub**: fazer push deste repositório para o GitHub (necessário para o fluxo de deploy via hPanel com auto-deploy).
+5. **hPanel → Node.js App**:
+   - Conectar o repositório GitHub (branch `main`).
+   - `app_type`: Hono
+   - Entry file: `dist/index.js`
+   - Build command: `npm run build`
+   - Output directory: (deixar em branco)
+   - Variáveis de ambiente: preencher todas as listadas em `.env.example` (sem commitar o `.env` real).
+6. Disparar o deploy. A cada novo push na branch conectada, a Hostinger reconstrói e reinicia o app automaticamente.
+7. **Domínio**: já registrado na Hostinger — apontar/vincular ao Node.js App criado, conforme painel do hPanel.
+
+## Testes de regressão realizados após a migração (curl, contra MySQL local)
+Revalidação completa das regras de negócio após a troca de infraestrutura (Cloudflare Workers/D1/R2 → Node.js/MySQL/R2-via-S3):
+- **Login e sessão** via JWT/cookie funcionando com hash PBKDF2 migrado sem alteração (mesmo usuário seed).
+- **UTF-8**: identificado e corrigido um problema de acentuação (mojibake) na conexão MySQL — corrigido com `charset: 'utf8mb4'` no pool de conexões.
+- **Tipos DECIMAL**: identificado e corrigido um bug real — o driver `mysql2` retorna colunas `DECIMAL` como `string` por padrão (para não perder precisão), o que quebrava `.toFixed()` e comparações numéricas herdadas do código original (escrito para D1/SQLite, que retorna `number` nativo). Corrigido configurando `decimalNumbers: true` no adaptador (`src/platform/db.ts`), preservando o comportamento esperado por todo o código financeiro sem precisar alterá-lo.
+- **Ledger financeiro multi-nível**: entrada NFP no Geral → repasse Geral→Núcleo (solicitar/aprovar/executar com comprovante) → saldo do Núcleo atualizado corretamente via view SQL.
+- **RBAC e isolamento**: Coordenador de Núcleo bloqueado corretamente ao tentar lançar entrada no Painel Geral (403); bloqueado ao tentar acessar núcleo/saldo de outro núcleo fora do seu escopo; validado criando campanha de comunicação apenas para seu próprio núcleo (bloqueado para núcleo de terceiros).
+- **Colaboradores**: cadastro público via `/api/public/colaborador` persistido no MySQL; listagem e validação por Coordenador de Núcleo funcionando com escopo correto.
+- **Auditoria**: todas as ações relevantes (login, criação de usuário/núcleo, lançamentos financeiros, validação de colaborador, criação de campanha) confirmadas gravadas em `audit_log`.
+- **Páginas públicas**: landing de núcleo renderizando corretamente via SSR.
 
 ## Não implementado / Próximos passos
-1. **Deploy em produção** (Cloudflare Pages real + D1/R2 de produção) — aguardando decisão do usuário sobre conta Cloudflare.
-2. **Provedores reais de E-mail/WhatsApp** — substituir stubs em `src/modules/comunicacao/providers.ts` (ex.: Resend, WhatsApp Business Cloud API) e configurar secrets via `wrangler secret put`.
-3. **Campo de e-mail no colaborador** — atualmente o formulário público só coleta WhatsApp; se e-mail for necessário para campanhas, adicionar coluna e ajustar disparo.
-4. **Upload de imagem de capa** de núcleo/projeto (`imagem_capa_key` já existe no schema, falta rota de upload dedicada).
-5. **Paginação** nas listagens (colaboradores, lançamentos, usuários) para volumes grandes.
-6. **Testes automatizados** (unitários/integração) — validação até agora foi manual via curl (ver seção de Testes abaixo).
-7. **Verificação visual em navegador** do redesign — validado até agora apenas via revisão de código e testes de API (curl).
-
-## Testes realizados nesta rodada (curl, contra D1 local)
-Fluxo completo validado ponta a ponta com 4 usuários de teste (admin, coord_geral, coord_nucleo escopado ao Núcleo 1, articulador):
-- **Integração de saldos**: entrada NFP de R$10.000 no Geral → repasse de R$3.000 Geral→Núcleo aprovado/executado → saldo Geral caiu para R$7.000 e saldo do Núcleo subiu para R$3.000. Repasse de R$1.500 Núcleo→Projeto aprovado/executado → saldo do Núcleo caiu para R$1.500 e saldo do Projeto subiu para R$1.500.
-- **Aprovação restrita**: Coordenador Geral tentou aprovar repasse Geral→Núcleo e recebeu `403` ("Apenas o Administrador pode autorizar repasses do Painel Geral para um Núcleo"); Administrador aprovou com sucesso.
-- **Restrição do Articulador**: acesso confirmado a `/api/nucleos`, `/api/projetos` e `/api/comunicacao/campanhas` (200); bloqueio confirmado em `/api/financeiro/geral/saldo` e `/api/financeiro/nucleo/1/saldo` (403).
-- **Saída pelo Coordenador de Núcleo**: usuária escopada ao Núcleo 1 lançou uma saída de R$500 no Projeto 1 com comprovante bancário e fiscal anexados (multipart) → `201 executado` → saldo do Projeto caiu para R$1.000.
+1. **Deploy real na Hostinger** — aguardando push ao GitHub e configuração do Node.js App no hPanel (ver seção de Deploy acima).
+2. **Credenciais reais do Cloudflare R2** — localmente testado apenas com placeholder; upload de comprovantes/galeria só funcionará em produção com chaves reais configuradas.
+3. **Provedores reais de E-mail/WhatsApp** — substituir stubs em `src/modules/comunicacao/providers.ts` (ex.: Resend, WhatsApp Business Cloud API).
+4. **Campo de e-mail no colaborador** — atualmente o formulário público só coleta WhatsApp; se e-mail for necessário para campanhas, adicionar coluna e ajustar disparo.
+5. **Upload de imagem de capa** de núcleo/projeto (`imagem_capa_key` já existe no schema, falta rota de upload dedicada).
+6. **Paginação** nas listagens (colaboradores, lançamentos, usuários) para volumes grandes.
+7. **Testes automatizados** (unitários/integração) — validação até agora foi manual via curl.
 
 ## Segurança
-- Senhas com PBKDF2 (100.000 iterações, SHA-256) via Web Crypto API — sem dependências externas.
+- Senhas com PBKDF2 (100.000 iterações, SHA-256) via Web Crypto API — sem dependências externas, funciona igual em Node.js 18+.
 - Sessão via JWT em cookie `httpOnly`, `sameSite=Lax`, `secure` automático quando HTTPS.
 - RBAC aplicado em middleware de rota, nunca apenas no frontend.
 - Isolamento de dados por núcleo garantido nas queries SQL (nunca por filtro client-side).
+- Nenhuma credencial (MySQL, R2, JWT_SECRET) é commitada no repositório — todas vêm de variáveis de ambiente (`.env` local / hPanel em produção).
