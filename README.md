@@ -12,9 +12,11 @@
 ✅ **Páginas públicas de Núcleo/Projeto** (sem login, com formulário de colaborador)
 ✅ **Migração de infraestrutura concluída**: Cloudflare Workers/D1/R2-nativo → Node.js/MySQL/R2-via-S3, para viabilizar o deploy na Hostinger
 ✅ **Testado localmente contra MySQL real** (MariaDB), com todas as regras de negócio revalidadas após a migração
+✅ **Deploy em produção na Hostinger concluído** — app Node.js ativo, GitHub-integrado (auto-deploy a cada push em `main`), domínio `nfp.social.br` (DNS/HTTPS pendentes de propagação)
+✅ **Ciclo de vida de comprovantes implementado** (download único + expiração em 30 dias — ver seção dedicada abaixo)
 ⚠️ **E-mail e WhatsApp em modo STUB** (simulação em log — ver `src/modules/comunicacao/providers.ts`)
-⚠️ **Upload de comprovantes/galeria depende de credenciais reais do Cloudflare R2** — com credenciais placeholder, o upload falha (comportamento esperado; ver seção R2 abaixo)
-🔲 **Deploy em produção na Hostinger** — aguardando push ao GitHub e configuração do app no hPanel (ver seção de Deploy)
+⚠️ **Senha padrão do admin de seed (`admin123`) ainda ativa em produção** — trocar antes de uso real
+⚠️ **Confirmar se as variáveis de ambiente `R2_*` estão configuradas no painel da Hostinger** — sem elas, upload/download de comprovantes e galeria falha
 
 ## Login de teste (seed)
 - **E-mail**: `admin@nfp.org.br`
@@ -125,8 +127,44 @@ Toda mutação relevante grava uma linha em `audit_log` (nunca editável/deletá
 | POST | `/api/financeiro/repasses/:id/executar` (multipart, comprovante_bancario) | **somente admin** |
 | POST | `/api/financeiro/projeto/:id/saidas` (multipart, comprovante_bancario + comprovante_fiscal) | admin, coord_geral, **coord_nucleo do núcleo responsável pelo projeto** |
 | GET/POST | `/api/comunicacao/campanhas`, `/api/comunicacao/campanhas/:id/enviar` | admin, coord_geral, coord_nucleo, articulador (Articulador NÃO tem acesso a nenhuma rota `/api/financeiro/*`) |
+| GET | `/api/financeiro/lancamentos/:id/comprovantes` | mesmo escopo do lançamento (admin/coord_geral/coord_nucleo do núcleo) |
+| GET | `/api/financeiro/comprovantes/:id/arquivo` | mesmo escopo do lançamento — baixa o arquivo (ver "Ciclo de vida dos comprovantes" abaixo) |
 | POST | `/api/public/colaborador` | Público (sem login) |
 | GET | `/n/:slug`, `/p/:slug` | Público (sem login) |
+
+## Ciclo de vida dos comprovantes (download único + expiração em 30 dias)
+
+Requisito de negócio: o comprovante (bancário/fiscal) fica disponível para download
+enquanto ninguém o baixar. No **primeiro download**, inicia-se uma contagem de
+**30 dias**; passado esse prazo, o **arquivo binário** é removido do armazenamento
+(Cloudflare R2) automaticamente. O **registro/metadado** do comprovante (`comprovantes`
+no MySQL) nunca é apagado — permanece para fins de auditoria/prestação de contas,
+apenas marcado como `expirado = 1`.
+
+- `GET /api/financeiro/comprovantes/:id/arquivo`: serve o binário com
+  `Content-Disposition: attachment` (botão "Baixar" no frontend). Na primeira vez que
+  o arquivo é servido, grava `baixado_em = agora` e `expira_em = agora + 30 dias`.
+  Downloads seguintes não recalculam `expira_em`. Depois de `expirado = 1`, a rota
+  responde **HTTP 410 Gone** com mensagem explicando que o arquivo foi removido
+  após o prazo de retenção.
+- `src/jobs/limpeza-comprovantes.ts`: roda **dentro do próprio processo Node.js**
+  (via `setInterval`, a cada 24h, com uma primeira execução 10s após o boot). Isso é
+  seguro e suficiente aqui porque a Hostinger hospeda um **processo Node.js
+  persistente e de longa duração** — diferente de um ambiente serverless (ex.:
+  Cloudflare Workers Hosted Deploy), que não permite `triggers`/cron.
+- Migration: `migrations/mysql/0003_comprovantes_ciclo_de_vida.sql` adiciona as
+  colunas `baixado_em`, `expira_em` e `expirado` à tabela `comprovantes`.
+
+### Por que o arquivo continua no Cloudflare R2 (e não no disco da Hostinger)?
+Foi cogitado guardar os arquivos diretamente no disco da hospedagem Hostinger para
+simplificar a arquitetura, mas isso foi **descartado por risco de perda de dados**:
+conforme a própria documentação da Hostinger, os diretórios de deploy (`hbuilds/`,
+`public_html`) são **sobrescritos a cada novo deploy** do app Node.js. Um comprovante
+financeiro gravado em disco local seria apagado silenciosamente na próxima vez que
+o código for atualizado (ex.: um futuro ajuste de bug) — inaceitável para documentos
+de prestação de contas. O R2 (via API S3-compatível) permanece como o armazenamento
+real dos arquivos; a mudança pedida (botão de download + expiração em 30 dias) foi
+implementada **na camada de aplicação**, preservando a durabilidade dos arquivos.
 
 ## Variáveis de ambiente
 
@@ -178,6 +216,13 @@ curl http://localhost:3000
 6. Disparar o deploy. A cada novo push na branch conectada, a Hostinger reconstrói e reinicia o app automaticamente.
 7. **Domínio**: já registrado na Hostinger — apontar/vincular ao Node.js App criado, conforme painel do hPanel.
 
+### Status atual do deploy (produção)
+- App Node.js criado corretamente na Hostinger como **"Web App"** com GitHub integrado (branch `main`, auto-deploy a cada push) — confirmado funcional via testes diretos (login, RBAC, UTF-8, SQL-injection, páginas públicas) contra o banco MySQL real.
+- Domínio: `nfp.social.br` — DNS ainda propagando; testado via `curl --resolve nfp.social.br:PORT:193.203.175.122` enquanto a propagação não completa. HTTPS/certificado SSL pendente até a propagação de DNS.
+- Banco de dados de produção: `u733854142_gestao_nfp` em `srv1597.hstgr.io`, com as migrations `0001`, `0002` e `0003` aplicadas e verificadas.
+- **Pendências de configuração a confirmar no hPanel**: variáveis `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` — sem elas, upload/download de comprovantes e galeria falha (o restante do sistema funciona normalmente).
+- **Pendência crítica de segurança**: a senha do usuário admin de seed (`admin123`) ainda está ativa em produção — deve ser trocada antes de uso real (via `POST /api/auth/usuarios` + `/promover-admin` para um novo admin, seguido de desativação do seed, ou diretamente no banco).
+
 ## Testes de regressão realizados após a migração (curl, contra MySQL local)
 Revalidação completa das regras de negócio após a troca de infraestrutura (Cloudflare Workers/D1/R2 → Node.js/MySQL/R2-via-S3):
 - **Login e sessão** via JWT/cookie funcionando com hash PBKDF2 migrado sem alteração (mesmo usuário seed).
@@ -188,6 +233,16 @@ Revalidação completa das regras de negócio após a troca de infraestrutura (C
 - **Colaboradores**: cadastro público via `/api/public/colaborador` persistido no MySQL; listagem e validação por Coordenador de Núcleo funcionando com escopo correto.
 - **Auditoria**: todas as ações relevantes (login, criação de usuário/núcleo, lançamentos financeiros, validação de colaborador, criação de campanha) confirmadas gravadas em `audit_log`.
 - **Páginas públicas**: landing de núcleo renderizando corretamente via SSR.
+
+## Testes de regressão — ciclo de vida de comprovantes (download único + expiração 30 dias)
+Validado localmente, de ponta a ponta, contra MySQL real (MariaDB) e um storage mock equivalente ao R2:
+- Upload de saída de projeto com comprovantes bancário+fiscal obrigatórios → `baixado_em`/`expira_em` iniciam `NULL` para ambos.
+- Primeiro download de um dos dois comprovantes → grava `baixado_em` (timestamp do download) e `expira_em` (+30 dias); o outro comprovante (ainda não baixado) permanece intocado.
+- Segundo download do mesmo comprovante → `expira_em` **não** é recalculado (confirma que a contagem começa apenas no primeiro download).
+- `Content-Disposition: attachment; filename="..."` presente na resposta (download real no navegador, não apenas abrir inline).
+- Execução do job de limpeza (`limparComprovantesExpirados`) com `expira_em` forçado para o passado → arquivo removido do storage, linha marcada `expirado = 1`, registro mantido na tabela.
+- Tentativa de download de um comprovante já expirado → **HTTP 410 Gone** com mensagem explicativa, sem tentar acessar o storage.
+- **Correção de RBAC também aplicada nesta mudança**: a rota `GET /api/financeiro/comprovantes/:id/arquivo` **não validava escopo** (qualquer usuário autenticado podia baixar qualquer comprovante por id). Corrigido para aplicar a mesma regra de acesso usada na listagem (`userCanAccessNucleo` / `isGlobalUser`) — testado com usuário `articulador` (sem acesso financeiro) tentando baixar um comprovante fora de seu alcance → corretamente bloqueado com 403.
 
 ## Não implementado / Próximos passos
 1. **Deploy real na Hostinger** — aguardando push ao GitHub e configuração do Node.js App no hPanel (ver seção de Deploy acima).

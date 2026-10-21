@@ -614,17 +614,35 @@ function renderLancamentosTable(lancamentos) {
   </div>`;
 }
 
+function comprovanteStatusLabel(cp) {
+  if (cp.expirado) {
+    return '<span class="text-xs text-red-500"><i class="fas fa-ban mr-1"></i>Expirado (removido 30 dias após o download)</span>';
+  }
+  if (cp.baixado_em) {
+    const expira = cp.expira_em ? new Date(cp.expira_em.replace(' ', 'T')) : null;
+    const dias = expira ? Math.max(0, Math.ceil((expira - new Date()) / (24 * 60 * 60 * 1000))) : null;
+    return `<span class="text-xs text-amber-600"><i class="fas fa-clock mr-1"></i>Baixado — expira em ${dias != null ? dias + ' dia(s)' : '30 dias'}</span>`;
+  }
+  return '<span class="text-xs text-emerald-600"><i class="fas fa-circle-check mr-1"></i>Disponível (ainda não baixado)</span>';
+}
+
 async function verComprovantes(lancamentoId) {
   try {
     const { data } = await axios.get(`/api/financeiro/lancamentos/${lancamentoId}/comprovantes`);
     const comprovantes = data.data;
     openModal(`
       <h3 class="text-lg font-bold text-gray-800 mb-4">Comprovantes</h3>
+      <p class="text-xs text-gray-500 mb-3">O arquivo fica disponível até o primeiro download; depois disso é removido do armazenamento em 30 dias. O registro do comprovante é mantido para fins de auditoria.</p>
       <ul class="space-y-2">
         ${comprovantes.map(cp => `
-          <li class="flex items-center justify-between border rounded-lg px-3 py-2">
-            <span class="text-sm"><i class="fas fa-file-invoice mr-1 text-gray-400"></i> ${cp.tipo} — ${cp.nome_arquivo || 'arquivo'}</span>
-            <a href="/api/financeiro/comprovantes/${cp.id}/arquivo" target="_blank" class="text-brand-600 hover:underline text-xs font-medium">Abrir</a>
+          <li class="flex items-center justify-between border rounded-lg px-3 py-2 gap-3">
+            <div class="min-w-0">
+              <span class="text-sm block truncate"><i class="fas fa-file-invoice mr-1 text-gray-400"></i> ${cp.tipo} — ${cp.nome_arquivo || 'arquivo'}</span>
+              ${comprovanteStatusLabel(cp)}
+            </div>
+            ${cp.expirado
+              ? '<span class="text-xs text-gray-400 font-medium whitespace-nowrap">Indisponível</span>'
+              : `<a href="/api/financeiro/comprovantes/${cp.id}/arquivo" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 text-xs font-medium whitespace-nowrap"><i class="fas fa-download"></i> Baixar</a>`}
           </li>`).join('') || '<li class="text-gray-400 text-sm">Nenhum comprovante.</li>'}
       </ul>
       <div class="flex justify-end pt-4"><button onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Fechar</button></div>`);

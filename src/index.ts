@@ -5,6 +5,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from './types/bindings'
 import { getDatabase } from './platform/db'
 import { getStorage } from './platform/storage'
+import { agendarLimpezaComprovantes } from './jobs/limpeza-comprovantes'
 
 import authRoutes from './modules/auth/routes'
 import nucleosRoutes from './modules/nucleos/routes'
@@ -49,6 +50,11 @@ app.use('*', async (c, next) => {
   c.env.JWT_SECRET = jwtSecret
   await next()
 })
+
+// Job de limpeza: remove do R2 (após o processo Node.js persistente na
+// Hostinger subir) os comprovantes cujo prazo de retenção de 30 dias após
+// o primeiro download já expirou. Ver src/jobs/limpeza-comprovantes.ts.
+agendarLimpezaComprovantes(db, r2)
 
 app.use('/static/*', serveStatic({ root: './public' }))
 

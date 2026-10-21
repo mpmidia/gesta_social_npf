@@ -388,16 +388,63 @@ financeiro.get('/lancamentos/:id/comprovantes', async (c) => {
   return okResponse(c, results)
 })
 
+// Ciclo de vida do arquivo (ver migrations/mysql/0003_comprovantes_ciclo_de_vida.sql):
+// o arquivo fica disponível indefinidamente até o primeiro download. No primeiro
+// download, grava-se `baixado_em` e `expira_em` (= baixado_em + 30 dias). Depois de
+// `expira_em`, o job de limpeza (src/jobs/limpeza-comprovantes.ts) remove o binário
+// do R2 e marca `expirado = 1` — o metadado permanece para fins de auditoria.
+const RETENCAO_APOS_DOWNLOAD_DIAS = 30
+
 financeiro.get('/comprovantes/:id/arquivo', async (c) => {
+  const actor = c.get('user')
   const id = Number(c.req.param('id'))
   const comprovante = await c.env.DB.prepare('SELECT * FROM comprovantes WHERE id = ?').bind(id).first<any>()
   if (!comprovante) return errorResponse(c, 404, 'Comprovante não encontrado.')
 
+  // Mesma regra de acesso usada para listar comprovantes de um lançamento —
+  // sem isso, qualquer usuário autenticado poderia baixar qualquer comprovante
+  // pelo id, mesmo fora do seu escopo de núcleo/projeto.
+  const lancamento = await c.env.DB.prepare('SELECT nucleo_id, nivel FROM financeiro_lancamentos WHERE id = ?')
+    .bind(comprovante.lancamento_id)
+    .first<any>()
+  if (!lancamento) return errorResponse(c, 404, 'Lançamento associado não encontrado.')
+  if (lancamento.nucleo_id && !(await userCanAccessNucleo(actor, lancamento.nucleo_id))) {
+    return errorResponse(c, 403, 'Sem acesso a este comprovante.')
+  }
+  if (lancamento.nivel === 'geral' && !isGlobalUser(actor)) {
+    return errorResponse(c, 403, 'Sem acesso a este comprovante.')
+  }
+
+  if (comprovante.expirado) {
+    return errorResponse(c, 410, 'Este arquivo já expirou e foi removido do armazenamento 30 dias após o primeiro download. O registro do comprovante permanece para fins de auditoria.')
+  }
+
   const object = await c.env.R2.get(comprovante.r2_key)
   if (!object) return errorResponse(c, 404, 'Arquivo não encontrado no armazenamento.')
 
+  // Primeiro download: inicia a contagem de retenção de 30 dias.
+  if (!comprovante.baixado_em) {
+    await c.env.DB.prepare(
+      `UPDATE comprovantes SET baixado_em = CURRENT_TIMESTAMP, expira_em = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY) WHERE id = ?`
+    )
+      .bind(RETENCAO_APOS_DOWNLOAD_DIAS, id)
+      .run()
+
+    await logAudit(c, {
+      userId: actor.sub,
+      acao: 'financeiro.comprovante.primeiro_download',
+      entidade: 'comprovantes',
+      entidadeId: id,
+      payload: { retencao_dias: RETENCAO_APOS_DOWNLOAD_DIAS }
+    })
+  }
+
+  const nomeArquivo = comprovante.nome_arquivo || `comprovante-${id}`
   return new Response(object.body, {
-    headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream' }
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${nomeArquivo.replace(/"/g, '')}"`
+    }
   })
 })
 
