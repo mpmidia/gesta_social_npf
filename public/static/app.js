@@ -48,7 +48,8 @@ function statusBadge(status) {
     pendente: 'bg-amber-100 text-amber-700',
     aprovado: 'bg-blue-100 text-blue-700',
     executado: 'bg-emerald-100 text-emerald-700',
-    rejeitado: 'bg-red-100 text-red-700'
+    rejeitado: 'bg-red-100 text-red-700',
+    cancelado: 'bg-gray-200 text-gray-500'
   };
   return `<span class="text-xs font-semibold px-2 py-1 rounded-full ${map[status] || 'bg-gray-100 text-gray-700'}">${status}</span>`;
 }
@@ -582,7 +583,8 @@ function openUploadGaleriaModal(projetoId) {
 // TABELA GENÉRICA DE LANÇAMENTOS
 // ============================================================
 
-function renderLancamentosTable(lancamentos) {
+function renderLancamentosTable(lancamentos, opts = {}) {
+  const permitirEdicaoManual = !!opts.permitirEdicaoManual;
   if (!lancamentos.length) return '<p class="text-gray-400 text-sm">Nenhum lançamento.</p>';
   return `
   <div class="overflow-x-auto">
@@ -598,20 +600,39 @@ function renderLancamentosTable(lancamentos) {
         </tr>
       </thead>
       <tbody>
-        ${lancamentos.map(l => `
+        ${lancamentos.map(l => {
+          const ehManual = l.tipo === 'entrada_manual' || l.tipo === 'saida_manual';
+          const acoes = [];
+          if (l.status === 'executado') acoes.push(`<button onclick="verComprovantes(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Comprovantes</button>`);
+          if (permitirEdicaoManual && ehManual && l.status === 'executado') {
+            acoes.push(`<button onclick="editarLancamentoManual(${l.id})" class="text-amber-600 hover:underline text-xs font-medium">Editar</button>`);
+            if (isAdmin()) acoes.push(`<button onclick="excluirLancamentoManual(${l.id})" class="text-red-600 hover:underline text-xs font-medium">Excluir</button>`);
+          }
+          return `
           <tr class="border-b last:border-0">
-            <td class="py-2 pr-3">${l.tipo}</td>
-            <td class="py-2 pr-3 font-medium">${fmtMoney(l.valor)}</td>
+            <td class="py-2 pr-3">${tipoLancamentoLabel(l.tipo)}</td>
+            <td class="py-2 pr-3 font-medium ${l.tipo === 'saida_manual' ? 'text-red-600' : ''}">${fmtMoney(l.valor)}</td>
             <td class="py-2 pr-3">${statusBadge(l.status)}</td>
             <td class="py-2 pr-3 text-gray-500">${l.finalidade || '-'}</td>
             <td class="py-2 pr-3 text-gray-400">${fmtDate(l.created_at)}</td>
-            <td class="py-2 pr-3">
-              ${l.status === 'executado' ? `<button onclick="verComprovantes(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Comprovantes</button>` : '-'}
-            </td>
-          </tr>`).join('')}
+            <td class="py-2 pr-3 whitespace-nowrap space-x-2">${acoes.join('') || '-'}</td>
+          </tr>`;
+        }).join('')}
       </tbody>
     </table>
   </div>`;
+}
+
+function tipoLancamentoLabel(tipo) {
+  const labels = {
+    entrada_nfp: 'Entrada NFP (planilha)',
+    entrada_manual: 'Entrada manual',
+    saida_manual: 'Saída manual',
+    repasse_geral_nucleo: 'Repasse Geral → Núcleo',
+    repasse_nucleo_projeto: 'Repasse Núcleo → Projeto',
+    saida_pagamento: 'Saída (pagamento)'
+  };
+  return labels[tipo] || tipo;
 }
 
 function comprovanteStatusLabel(cp) {
@@ -667,9 +688,14 @@ async function renderFinanceiroGeral() {
         <p class="text-sm text-gray-500 mb-1">Saldo Geral Disponível</p>
         <p class="text-3xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>
       </div>
-      <button onclick="openImportarNfpModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
-        <i class="fas fa-file-import mr-1"></i> Importar planilha da NFP
-      </button>
+      <div class="flex gap-2">
+        <button onclick="openLancamentoManualModal('entrada')" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
+          <i class="fas fa-plus mr-1"></i> Lançamento manual
+        </button>
+        <button onclick="openImportarNfpModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
+          <i class="fas fa-file-import mr-1"></i> Importar planilha da NFP
+        </button>
+      </div>
     </div>
     <div class="gs-card p-5 mb-6">
       <h3 class="font-semibold text-gray-700 mb-1">Importações da planilha NFP</h3>
@@ -700,8 +726,78 @@ async function renderFinanceiroGeral() {
     </div>
     <div class="gs-card p-5">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Geral</h3>
-      ${renderLancamentosTable(lancamentosData.data)}
+      ${renderLancamentosTable(lancamentosData.data, { permitirEdicaoManual: true })}
     </div>`;
+}
+
+function openLancamentoManualModal(direcaoInicial) {
+  openModal(`
+    <h3 class="text-lg font-bold text-gray-800 mb-4">Novo lançamento manual</h3>
+    <p class="text-sm text-gray-600 mb-3">Use para ajustes pontuais que não vêm da planilha da NFP (ex.: estorno, taxa bancária, correção de valor). Justificativa obrigatória — fica registrada na auditoria.</p>
+    <form id="form-lancamento-manual" class="space-y-3">
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Direção</label>
+        <select name="direcao" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
+          <option value="entrada" ${direcaoInicial === 'entrada' ? 'selected' : ''}>Entrada (soma ao saldo)</option>
+          <option value="saida" ${direcaoInicial === 'saida' ? 'selected' : ''}>Saída (subtrai do saldo)</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Valor (R$)</label>
+        <input name="valor" type="number" step="0.01" min="0.01" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Finalidade / Justificativa</label>
+        <textarea name="finalidade" required rows="2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></textarea>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+        <button type="submit" id="btn-lancamento-manual" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Lançar</button>
+      </div>
+    </form>`);
+
+  document.getElementById('form-lancamento-manual').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('btn-lancamento-manual');
+    const fd = new FormData(e.target);
+    btn.disabled = true;
+    try {
+      await axios.post('/api/financeiro/geral/lancamentos-manuais', {
+        direcao: fd.get('direcao'),
+        valor: parseFloat(fd.get('valor')),
+        finalidade: fd.get('finalidade')
+      });
+      closeModal();
+      toast('Lançamento manual registrado.');
+      renderFinanceiroGeral();
+    } catch (err) {
+      toast(apiErr(err), 'error');
+      btn.disabled = false;
+    }
+  });
+}
+
+async function editarLancamentoManual(id) {
+  const valor = prompt('Novo valor (R$):');
+  if (valor === null) return;
+  const valorNum = parseFloat(valor.replace(',', '.'));
+  if (!valorNum || valorNum <= 0) { toast('Valor inválido.', 'error'); return; }
+  const finalidade = prompt('Finalidade / justificativa:');
+  if (finalidade === null || !finalidade.trim()) { toast('Finalidade é obrigatória.', 'error'); return; }
+  try {
+    await axios.put(`/api/financeiro/geral/lancamentos-manuais/${id}`, { valor: valorNum, finalidade });
+    toast('Lançamento atualizado.');
+    renderFinanceiroGeral();
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+async function excluirLancamentoManual(id) {
+  if (!confirm('Excluir (cancelar) este lançamento manual? O registro é mantido para auditoria, mas deixa de contar no saldo.')) return;
+  try {
+    await axios.delete(`/api/financeiro/geral/lancamentos-manuais/${id}`);
+    toast('Lançamento cancelado.');
+    renderFinanceiroGeral();
+  } catch (err) { toast(apiErr(err), 'error'); }
 }
 
 function openImportarNfpModal() {

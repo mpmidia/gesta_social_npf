@@ -46,12 +46,19 @@ async function uploadComprovanteFile(
 
 // ================= PAINEL GERAL =================
 //
-// O Painel Geral NÃO recebe mais lançamentos manuais de entrada — a única
-// forma de lançar entrada no Geral é importando a planilha de créditos
-// exportada do site da Nota Fiscal Paulista (ver rota /geral/importar-nfp
-// abaixo). Isso garante que todo valor lançado no Geral tenha lastro
-// rastreável no arquivo oficial da NFP (CNPJ, nota fiscal, data), em vez
-// de um valor digitado manualmente sem comprovação.
+// A forma PRINCIPAL de lançar entrada no Geral é importando a planilha de
+// créditos exportada do site da Nota Fiscal Paulista (ver rota
+// /geral/importar-nfp abaixo) — isso garante que a maior parte do valor
+// lançado no Geral tenha lastro rastreável no arquivo oficial da NFP (CNPJ,
+// nota fiscal, data), em vez de ser digitado manualmente sem comprovação.
+//
+// Além disso, admin/coord_geral podem registrar lançamentos MANUAIS pontuais
+// (/geral/lancamentos-manuais) para ajustes que não vêm da planilha — ex.:
+// estorno, taxa bancária, correção de valor, doação direta etc. Esses
+// lançamentos usam tipos próprios (entrada_manual/saida_manual), exigem
+// finalidade/justificativa obrigatória e ficam sempre auditados em
+// audit_log, mas NUNCA se confundem com entrada_nfp (que só é criada pela
+// importação da planilha).
 
 // Importação da planilha de créditos NFP (admin, coord_geral) — cada linha
 // elegível (Créditos > 0 e Situação != "A Calcular") vira um lançamento de
@@ -219,6 +226,129 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'coord_geral'), asyn
     linhasIgnoradas: resultado.linhasIgnoradasZeroOuACalcular,
     valorTotalImportado: valorTotal
   }, 201)
+})
+
+// Lançamento manual no Painel Geral — para correções/ajustes pontuais que não
+// vêm da planilha NFP (ex.: estorno, taxa bancária, correção de valor). Fica
+// SEPARADO da importação automática (tipo 'entrada_nfp'), sempre com
+// finalidade obrigatória e registro em audit_log, para manter rastreabilidade
+// mesmo sendo um lançamento digitado manualmente.
+financeiro.post('/geral/lancamentos-manuais', requireRole('admin', 'coord_geral'), async (c) => {
+  const actor = c.get('user')
+  const body = await c.req.json<{ direcao?: 'entrada' | 'saida'; valor?: number; finalidade?: string }>().catch(() => ({} as any))
+  const { direcao, valor, finalidade } = body
+
+  if (direcao !== 'entrada' && direcao !== 'saida') {
+    return errorResponse(c, 422, 'Informe a direção do lançamento: "entrada" ou "saida".')
+  }
+  if (!valor || valor <= 0) return errorResponse(c, 422, 'Informe um valor positivo.')
+  if (!finalidade || !finalidade.trim()) {
+    return errorResponse(c, 422, 'Informe a finalidade/justificativa do lançamento manual.')
+  }
+
+  const tipo = direcao === 'entrada' ? 'entrada_manual' : 'saida_manual'
+
+  if (direcao === 'saida') {
+    const saldoRow = await c.env.DB.prepare('SELECT saldo FROM saldo_geral').first<{ saldo: number }>()
+    const saldoAtual = saldoRow?.saldo ?? 0
+    if (valor > saldoAtual) {
+      return errorResponse(c, 422, `Saldo geral insuficiente. Saldo atual: R$ ${saldoAtual.toFixed(2)}.`)
+    }
+  }
+
+  const result = await c.env.DB.prepare(
+    `INSERT INTO financeiro_lancamentos (nivel, tipo, valor, status, finalidade, solicitado_por, executado_por, executado_em)
+     VALUES ('geral', ?, ?, 'executado', ?, ?, ?, CURRENT_TIMESTAMP)`
+  )
+    .bind(tipo, valor, finalidade.trim(), actor.sub, actor.sub)
+    .run()
+
+  const lancamentoId = result.meta.last_row_id as number
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'financeiro.lancamento_manual.criar',
+    entidade: 'financeiro_lancamentos',
+    entidadeId: lancamentoId,
+    payload: { tipo, valor, finalidade }
+  })
+
+  return okResponse(c, { id: lancamentoId, tipo, valor, finalidade, status: 'executado' }, 201)
+})
+
+// Edita um lançamento manual existente (somente entrada_manual/saida_manual,
+// nunca entrada_nfp nem repasses — esses têm seu próprio ciclo de vida/lastro).
+financeiro.put('/geral/lancamentos-manuais/:id', requireRole('admin', 'coord_geral'), async (c) => {
+  const actor = c.get('user')
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json<{ valor?: number; finalidade?: string }>().catch(() => ({} as any))
+  const { valor, finalidade } = body
+
+  const lancamento = await c.env.DB.prepare(
+    `SELECT * FROM financeiro_lancamentos WHERE id = ? AND nivel = 'geral'`
+  ).bind(id).first<any>()
+
+  if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
+  if (!['entrada_manual', 'saida_manual'].includes(lancamento.tipo)) {
+    return errorResponse(c, 422, 'Apenas lançamentos manuais podem ser editados. Entradas importadas da NFP e repasses têm seu próprio fluxo.')
+  }
+  if (lancamento.status === 'cancelado') return errorResponse(c, 422, 'Este lançamento já foi cancelado.')
+
+  if (!valor || valor <= 0) return errorResponse(c, 422, 'Informe um valor positivo.')
+  if (!finalidade || !finalidade.trim()) return errorResponse(c, 422, 'Informe a finalidade/justificativa do lançamento.')
+
+  // Se for saída, verifica se o novo valor ainda cabe no saldo (considerando que o valor antigo será substituído).
+  if (lancamento.tipo === 'saida_manual') {
+    const saldoRow = await c.env.DB.prepare('SELECT saldo FROM saldo_geral').first<{ saldo: number }>()
+    const saldoSemEsteLancamento = (saldoRow?.saldo ?? 0) + Number(lancamento.valor)
+    if (valor > saldoSemEsteLancamento) {
+      return errorResponse(c, 422, `Saldo geral insuficiente para este novo valor. Saldo disponível (sem este lançamento): R$ ${saldoSemEsteLancamento.toFixed(2)}.`)
+    }
+  }
+
+  await c.env.DB.prepare(`UPDATE financeiro_lancamentos SET valor = ?, finalidade = ? WHERE id = ?`)
+    .bind(valor, finalidade.trim(), id)
+    .run()
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'financeiro.lancamento_manual.editar',
+    entidade: 'financeiro_lancamentos',
+    entidadeId: id,
+    payload: { valorAnterior: lancamento.valor, valorNovo: valor, finalidadeAnterior: lancamento.finalidade, finalidadeNova: finalidade }
+  })
+
+  return okResponse(c, { id, valor, finalidade })
+})
+
+// "Exclui" um lançamento manual — na prática faz soft-delete (status='cancelado')
+// para preservar o histórico/auditoria em vez de apagar a linha do ledger.
+// Lançamentos cancelados são automaticamente excluídos do cálculo de saldo.
+financeiro.delete('/geral/lancamentos-manuais/:id', requireRole('admin'), async (c) => {
+  const actor = c.get('user')
+  const id = Number(c.req.param('id'))
+
+  const lancamento = await c.env.DB.prepare(
+    `SELECT * FROM financeiro_lancamentos WHERE id = ? AND nivel = 'geral'`
+  ).bind(id).first<any>()
+
+  if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
+  if (!['entrada_manual', 'saida_manual'].includes(lancamento.tipo)) {
+    return errorResponse(c, 422, 'Apenas lançamentos manuais podem ser excluídos. Entradas importadas da NFP e repasses têm seu próprio fluxo.')
+  }
+  if (lancamento.status === 'cancelado') return errorResponse(c, 422, 'Este lançamento já foi cancelado.')
+
+  await c.env.DB.prepare(`UPDATE financeiro_lancamentos SET status = 'cancelado' WHERE id = ?`).bind(id).run()
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'financeiro.lancamento_manual.cancelar',
+    entidade: 'financeiro_lancamentos',
+    entidadeId: id,
+    payload: { tipo: lancamento.tipo, valor: lancamento.valor, finalidade: lancamento.finalidade }
+  })
+
+  return okResponse(c, { id, status: 'cancelado' })
 })
 
 // Histórico de importações realizadas (admin, coord_geral)
