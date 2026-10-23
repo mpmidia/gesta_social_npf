@@ -10,7 +10,8 @@ const ROLE_LABELS = {
   admin: 'Administrador',
   coord_geral: 'Coordenador Geral',
   coord_nucleo: 'Coordenador de Núcleo',
-  articulador: 'Articulador'
+  articulador: 'Articulador',
+  financeiro: 'Financeiro'
 };
 
 function hasRole(role) {
@@ -28,13 +29,21 @@ function isCoordNucleo() {
 function isArticulador() {
   return hasRole('articulador');
 }
+function isFinanceiro() {
+  return hasRole('financeiro');
+}
+// Visão 360° do financeiro: admin, coord_geral e o papel dedicado "financeiro"
+// enxergam todos os saldos/lançamentos/comprovantes, independente de escopo.
+function hasFinanceiroFullAccess() {
+  return isGlobal() || isFinanceiro();
+}
 function scopedNucleoIds() {
   return (CURRENT_USER?.roles || []).filter(r => r.role === 'coord_nucleo').map(r => r.escopo_id);
 }
 // Pode gerir (lançar saída/gerir recursos) os recursos de um determinado núcleo:
-// Admin sempre pode; Coordenador de Núcleo somente do seu próprio escopo.
+// Admin e Financeiro sempre podem; Coordenador de Núcleo somente do seu próprio escopo.
 function canManageNucleoFinance(nucleoId) {
-  return isAdmin() || scopedNucleoIds().includes(Number(nucleoId));
+  return isAdmin() || isFinanceiro() || scopedNucleoIds().includes(Number(nucleoId));
 }
 
 function fmtMoney(v) {
@@ -89,11 +98,14 @@ function buildNav() {
   items.push({ href: '#/', icon: 'fa-chart-line', label: 'Visão Geral' });
   items.push({ href: '#/nucleos', icon: 'fa-people-group', label: 'Núcleos' });
   items.push({ href: '#/projetos', icon: 'fa-diagram-project', label: 'Projetos' });
-  items.push({ href: '#/colaboradores', icon: 'fa-address-card', label: 'Colaboradores' });
+  if (!isFinanceiro()) {
+    items.push({ href: '#/colaboradores', icon: 'fa-address-card', label: 'Colaboradores' });
+  }
 
-  // Financeiro: Admin e Coordenador Geral têm o Painel Geral + Repasses (aprovação/execução).
+  // Financeiro: Admin, Coordenador Geral e o papel dedicado Financeiro têm o Painel
+  // Geral + Repasses (aprovação/execução) — visão 360° de todas as operações.
   // Articulador NUNCA vê nada de financeiro (apenas leitura institucional em Núcleos/Projetos + Comunicação).
-  if (isGlobal()) {
+  if (isGlobal() || isFinanceiro()) {
     items.push({ href: '#/financeiro-geral', icon: 'fa-sack-dollar', label: 'Financeiro Geral' });
     items.push({ href: '#/repasses', icon: 'fa-money-bill-transfer', label: 'Repasses' });
   }
@@ -105,10 +117,14 @@ function buildNav() {
       items.push({ href: `#/nucleos/${meuNucleoId}`, icon: 'fa-wallet', label: 'Meu Financeiro (Núcleo)' });
     }
   }
+  // Usuários & Permissões: visível SOMENTE para administradores.
   if (isAdmin()) {
     items.push({ href: '#/usuarios', icon: 'fa-users-gear', label: 'Usuários & Permissões' });
   }
-  items.push({ href: '#/comunicacao', icon: 'fa-bullhorn', label: 'Comunicação' });
+  // Comunicação: NÃO disponível ao papel Financeiro (somente operações financeiras).
+  if (!isFinanceiro()) {
+    items.push({ href: '#/comunicacao', icon: 'fa-bullhorn', label: 'Comunicação' });
+  }
 
   nav.innerHTML = items.map(i => `
     <a href="${i.href}" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg transition text-[13.5px]" data-href="${i.href}">
@@ -174,7 +190,7 @@ async function renderVisaoGeral() {
   let saldoGeralHtml = '';
   let saldoMeuNucleoHtml = '';
 
-  if (isGlobal()) {
+  if (isGlobal() || isFinanceiro()) {
     const { data } = await axios.get('/api/financeiro/geral/saldo');
     saldoGeralHtml = `
       <div class="gs-card p-5">
@@ -293,9 +309,18 @@ async function renderNucleoDetalhe(id) {
     <a href="#/nucleos" class="text-sm text-brand-600 hover:underline font-medium mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
     <div class="grid lg:grid-cols-3 gap-4 mb-6">
       <div class="lg:col-span-2 gs-card p-5">
-        <h2 class="text-xl font-bold text-gray-800 mb-1">${n.nome}</h2>
-        <p class="text-gray-500 text-sm mb-3">${n.descricao || ''}</p>
-        <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/n/${n.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/n/${n.slug_publico}</a></p>
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h2 class="text-xl font-bold text-gray-800 mb-1">${n.nome} ${n.arquivado_em ? '<span class="text-xs bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full align-middle">Arquivado</span>' : ''}</h2>
+            <p class="text-gray-500 text-sm mb-3">${n.descricao || ''}</p>
+            <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/n/${n.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/n/${n.slug_publico}</a></p>
+          </div>
+          ${isGlobal() && !n.arquivado_em ? `
+          <div class="flex gap-2 shrink-0">
+            <button onclick="openEditNucleoModal(${id})" class="text-xs text-gray-600 hover:text-brand-600 border border-gray-300 rounded-lg px-3 py-1.5"><i class="fas fa-pen mr-1"></i>Editar</button>
+            <button onclick="excluirOuArquivarNucleo(${id})" class="text-xs text-red-600 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5"><i class="fas fa-trash mr-1"></i>Excluir/Arquivar</button>
+          </div>` : ''}
+        </div>
       </div>
       <div class="gs-card p-5">
         <p class="text-sm text-gray-500 mb-1">Saldo do Núcleo</p>
@@ -307,7 +332,15 @@ async function renderNucleoDetalhe(id) {
       <div class="gs-card p-5">
         <h3 class="font-semibold text-gray-700 mb-3">Coordenadores</h3>
         <ul class="text-sm space-y-1">
-          ${(n.coordenadores || []).map(cd => `<li><i class="fas fa-user mr-1 text-gray-400"></i> ${cd.nome} (${cd.email})</li>`).join('') || '<li class="text-gray-400">Nenhum coordenador vinculado.</li>'}
+          ${(n.coordenadores || []).map(cd => `
+            <li class="flex items-center justify-between gap-2">
+              <span><i class="fas fa-user mr-1 text-gray-400"></i> ${cd.nome} (${cd.email})</span>
+              ${isGlobal() ? `
+                <span class="shrink-0 space-x-2">
+                  <button onclick="openAddCoordenadorModal(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-amber-600 hover:underline"><i class="fas fa-retweet mr-0.5"></i>Substituir</button>
+                  <button onclick="removerCoordenador(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-red-500 hover:underline"><i class="fas fa-times mr-0.5"></i>Remover</button>
+                </span>` : ''}
+            </li>`).join('') || '<li class="text-gray-400">Nenhum coordenador vinculado.</li>'}
         </ul>
         ${isGlobal() ? `<button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Vincular coordenador</button>` : ''}
       </div>
@@ -363,28 +396,95 @@ async function renderNucleoDetalhe(id) {
   }
 }
 
-function openAddCoordenadorModal(nucleoId) {
-  openModal(`
-    <h3 class="text-lg font-bold text-gray-800 mb-4">Vincular Coordenador de Núcleo</h3>
-    <p class="text-sm text-gray-500 mb-3">Informe o ID do usuário já cadastrado (crie o usuário em Usuários & Permissões antes, com papel coord_nucleo).</p>
-    <form id="form-add-coord" class="space-y-3">
-      <input name="user_id" type="number" required placeholder="ID do usuário" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
-      <div class="flex justify-end gap-2 pt-2">
-        <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Vincular</button>
-      </div>
-    </form>`);
+function openEditNucleoModal(nucleoId) {
+  axios.get(`/api/nucleos/${nucleoId}`).then(({ data }) => {
+    const n = data.data;
+    openModal(`
+      <h3 class="text-lg font-bold text-gray-800 mb-4">Editar Núcleo</h3>
+      <form id="form-edit-nucleo" class="space-y-3">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Nome</label>
+          <input name="nome" required value="${n.nome.replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Descrição</label>
+          <textarea name="descricao" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">${n.descricao || ''}</textarea>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-gray-600">
+          <input type="checkbox" name="ativo" ${n.ativo ? 'checked' : ''} /> Ativo (visível na página pública)
+        </label>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+          <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Salvar</button>
+        </div>
+      </form>`);
 
-  document.getElementById('form-add-coord').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const body = Object.fromEntries(new FormData(e.target).entries());
-    body.user_id = parseInt(body.user_id);
-    try {
-      await axios.post(`/api/nucleos/${nucleoId}/coordenadores`, body);
-      closeModal();
-      toast('Coordenador vinculado.');
-      renderNucleoDetalhe(nucleoId);
-    } catch (err) { toast(apiErr(err), 'error'); }
+    document.getElementById('form-edit-nucleo').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const body = { nome: fd.get('nome'), descricao: fd.get('descricao'), ativo: fd.get('ativo') === 'on' };
+      try {
+        await axios.put(`/api/nucleos/${nucleoId}`, body);
+        closeModal();
+        toast('Núcleo atualizado.');
+        renderNucleoDetalhe(nucleoId);
+      } catch (err) { toast(apiErr(err), 'error'); }
+    });
+  });
+}
+
+async function excluirOuArquivarNucleo(nucleoId) {
+  if (!confirm('Confirma excluir este núcleo? Se possuir histórico financeiro (mesmo zerado), ele será ARQUIVADO em vez de excluído, para preservar a rastreabilidade.')) return;
+  try {
+    const { data } = await axios.delete(`/api/nucleos/${nucleoId}`);
+    toast(data.data.message);
+    window.location.hash = '#/nucleos';
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+async function removerCoordenador(nucleoId, userId, nome) {
+  if (!confirm(`Remover ${nome} da coordenação deste núcleo?`)) return;
+  try {
+    await axios.delete(`/api/nucleos/${nucleoId}/coordenadores/${userId}`);
+    toast('Coordenador removido.');
+    renderNucleoDetalhe(nucleoId);
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+function openAddCoordenadorModal(nucleoId, substituirUserId, substituirNome) {
+  const titulo = substituirUserId ? `Substituir Coordenador (${substituirNome})` : 'Vincular Coordenador de Núcleo';
+  axios.get('/api/auth/usuarios').then(({ data }) => {
+    const candidatos = data.data.filter(u => u.ativo && u.roles.some(r => r.role === 'coord_nucleo'));
+    openModal(`
+      <h3 class="text-lg font-bold text-gray-800 mb-4">${titulo}</h3>
+      <p class="text-sm text-gray-500 mb-3">Selecione um usuário já cadastrado com papel "Coordenador de Núcleo" (crie o usuário em Usuários &amp; Permissões antes, se necessário).</p>
+      <form id="form-add-coord" class="space-y-3">
+        <select name="user_id" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
+          <option value="">Selecione...</option>
+          ${candidatos.map(u => `<option value="${u.id}">${u.nome} (${u.email})</option>`).join('')}
+        </select>
+        ${!candidatos.length ? '<p class="text-xs text-amber-600">Nenhum usuário com papel "Coordenador de Núcleo" disponível. Crie um em Usuários &amp; Permissões.</p>' : ''}
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+          <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">${substituirUserId ? 'Substituir' : 'Vincular'}</button>
+        </div>
+      </form>`);
+
+    document.getElementById('form-add-coord').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target).entries());
+      body.user_id = parseInt(body.user_id);
+      if (!body.user_id) { toast('Selecione um usuário.', 'error'); return; }
+      try {
+        if (substituirUserId) {
+          await axios.delete(`/api/nucleos/${nucleoId}/coordenadores/${substituirUserId}`);
+        }
+        await axios.post(`/api/nucleos/${nucleoId}/coordenadores`, body);
+        closeModal();
+        toast(substituirUserId ? 'Coordenador substituído.' : 'Coordenador vinculado.');
+        renderNucleoDetalhe(nucleoId);
+      } catch (err) { toast(apiErr(err), 'error'); }
+    });
   });
 }
 
@@ -440,6 +540,52 @@ function openCreateProjetoModal(nucleoId) {
   });
 }
 
+function openEditProjetoModal(projetoId) {
+  axios.get(`/api/projetos/${projetoId}`).then(({ data }) => {
+    const p = data.data;
+    openModal(`
+      <h3 class="text-lg font-bold text-gray-800 mb-4">Editar Projeto</h3>
+      <form id="form-edit-projeto" class="space-y-3">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Nome</label>
+          <input name="nome" required value="${p.nome.replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Descrição</label>
+          <textarea name="descricao" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">${p.descricao || ''}</textarea>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-gray-600">
+          <input type="checkbox" name="ativo" ${p.ativo ? 'checked' : ''} /> Ativo (visível na página pública)
+        </label>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+          <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Salvar</button>
+        </div>
+      </form>`);
+
+    document.getElementById('form-edit-projeto').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const body = { nome: fd.get('nome'), descricao: fd.get('descricao'), ativo: fd.get('ativo') === 'on' };
+      try {
+        await axios.put(`/api/projetos/${projetoId}`, body);
+        closeModal();
+        toast('Projeto atualizado.');
+        renderProjetoDetalhe(projetoId);
+      } catch (err) { toast(apiErr(err), 'error'); }
+    });
+  });
+}
+
+async function excluirOuArquivarProjeto(projetoId) {
+  if (!confirm('Confirma excluir este projeto? Se possuir histórico financeiro (mesmo zerado), ele será ARQUIVADO em vez de excluído, para preservar a rastreabilidade.')) return;
+  try {
+    const { data } = await axios.delete(`/api/projetos/${projetoId}`);
+    toast(data.data.message);
+    window.location.hash = '#/projetos';
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
 async function renderProjetoDetalhe(id) {
   const { data } = await axios.get(`/api/projetos/${id}`);
   const p = data.data;
@@ -451,13 +597,24 @@ async function renderProjetoDetalhe(id) {
 
   const canRequestRepasse = isGlobal() || scopedNucleoIds().includes(p.nucleo_id);
 
+  const canEditProjeto = isGlobal() || scopedNucleoIds().includes(p.nucleo_id);
+
   document.getElementById('page-content').innerHTML = `
     <a href="#/projetos" class="text-sm text-brand-600 hover:underline font-medium mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
     <div class="grid lg:grid-cols-3 gap-4 mb-6">
       <div class="lg:col-span-2 gs-card p-5">
-        <h2 class="text-xl font-bold text-gray-800 mb-1">${p.nome}</h2>
-        <p class="text-gray-500 text-sm mb-3">${p.descricao || ''}</p>
-        <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/p/${p.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/p/${p.slug_publico}</a></p>
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h2 class="text-xl font-bold text-gray-800 mb-1">${p.nome} ${p.arquivado_em ? '<span class="text-xs bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full align-middle">Arquivado</span>' : ''}</h2>
+            <p class="text-gray-500 text-sm mb-3">${p.descricao || ''}</p>
+            <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/p/${p.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/p/${p.slug_publico}</a></p>
+          </div>
+          ${canEditProjeto && !p.arquivado_em ? `
+          <div class="flex gap-2 shrink-0">
+            <button onclick="openEditProjetoModal(${id})" class="text-xs text-gray-600 hover:text-brand-600 border border-gray-300 rounded-lg px-3 py-1.5"><i class="fas fa-pen mr-1"></i>Editar</button>
+            <button onclick="excluirOuArquivarProjeto(${id})" class="text-xs text-red-600 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5"><i class="fas fa-trash mr-1"></i>Excluir/Arquivar</button>
+          </div>` : ''}
+        </div>
       </div>
       <div class="gs-card p-5">
         <p class="text-sm text-gray-500 mb-1">Saldo do Projeto</p>
@@ -636,6 +793,9 @@ function tipoLancamentoLabel(tipo) {
 }
 
 function comprovanteStatusLabel(cp) {
+  if (cp.arquivado_em) {
+    return '<span class="text-xs text-gray-500"><i class="fas fa-box-archive mr-1"></i>Arquivado manualmente</span>';
+  }
   if (cp.expirado) {
     return '<span class="text-xs text-red-500"><i class="fas fa-ban mr-1"></i>Expirado (removido 30 dias após o download)</span>';
   }
@@ -651,9 +811,10 @@ async function verComprovantes(lancamentoId) {
   try {
     const { data } = await axios.get(`/api/financeiro/lancamentos/${lancamentoId}/comprovantes`);
     const comprovantes = data.data;
+    const podeBaixarEArquivar = isAdmin() || isFinanceiro();
     openModal(`
       <h3 class="text-lg font-bold text-gray-800 mb-4">Comprovantes</h3>
-      <p class="text-xs text-gray-500 mb-3">O arquivo fica disponível até o primeiro download; depois disso é removido do armazenamento em 30 dias. O registro do comprovante é mantido para fins de auditoria.</p>
+      <p class="text-xs text-gray-500 mb-3">Anexado pelo Coordenador do Núcleo e disponibilizado ao Administrador/Financeiro para download. O arquivo fica disponível até o primeiro download; depois disso é removido do armazenamento em 30 dias. O registro do comprovante é mantido para fins de auditoria.</p>
       <ul class="space-y-2">
         ${comprovantes.map(cp => `
           <li class="flex items-center justify-between border rounded-lg px-3 py-2 gap-3">
@@ -661,12 +822,28 @@ async function verComprovantes(lancamentoId) {
               <span class="text-sm block truncate"><i class="fas fa-file-invoice mr-1 text-gray-400"></i> ${cp.tipo} — ${cp.nome_arquivo || 'arquivo'}</span>
               ${comprovanteStatusLabel(cp)}
             </div>
-            ${cp.expirado
-              ? '<span class="text-xs text-gray-400 font-medium whitespace-nowrap">Indisponível</span>'
-              : `<a href="/api/financeiro/comprovantes/${cp.id}/arquivo" class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 text-xs font-medium whitespace-nowrap"><i class="fas fa-download"></i> Baixar</a>`}
+            <span class="shrink-0 flex items-center gap-2">
+              ${!podeBaixarEArquivar ? '<span class="text-xs text-gray-400 italic whitespace-nowrap">Apenas Admin/Financeiro baixam</span>' : ''}
+              ${podeBaixarEArquivar && !cp.expirado && !cp.arquivado_em
+                ? `<a href="/api/financeiro/comprovantes/${cp.id}/arquivo" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 text-xs font-medium whitespace-nowrap"><i class="fas fa-download"></i> Baixar</a>`
+                : ''}
+              ${podeBaixarEArquivar && !cp.arquivado_em
+                ? `<button onclick="arquivarComprovante(${cp.id}, ${lancamentoId})" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 text-xs font-medium whitespace-nowrap"><i class="fas fa-box-archive"></i> Arquivar</button>`
+                : ''}
+              ${(cp.expirado || cp.arquivado_em) && !podeBaixarEArquivar ? '<span class="text-xs text-gray-400 font-medium whitespace-nowrap">Indisponível</span>' : ''}
+            </span>
           </li>`).join('') || '<li class="text-gray-400 text-sm">Nenhum comprovante.</li>'}
       </ul>
       <div class="flex justify-end pt-4"><button onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Fechar</button></div>`);
+  } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+async function arquivarComprovante(comprovanteId, lancamentoId) {
+  if (!confirm('Arquivar este comprovante? O arquivo será removido do armazenamento imediatamente (o registro permanece para auditoria).')) return;
+  try {
+    await axios.post(`/api/financeiro/comprovantes/${comprovanteId}/arquivar`);
+    toast('Comprovante arquivado.');
+    verComprovantes(lancamentoId);
   } catch (err) { toast(apiErr(err), 'error'); }
 }
 
@@ -675,12 +852,12 @@ async function verComprovantes(lancamentoId) {
 // ============================================================
 
 async function renderFinanceiroGeral() {
-  const [{ data: saldoData }, { data: lancamentosData }, { data: importacoesData }] = await Promise.all([
+  const [{ data: saldoData }, { data: importacoesData }] = await Promise.all([
     axios.get('/api/financeiro/geral/saldo'),
-    axios.get('/api/financeiro/geral/lancamentos'),
     axios.get('/api/financeiro/geral/importacoes')
   ]);
   const importacoes = importacoesData.data;
+  const podeGerir = isGlobal(); // financeiro tem visão 360° mas não lança manual/importa
 
   document.getElementById('page-content').innerHTML = `
     <div class="gs-card p-5 mb-6 flex items-center justify-between flex-wrap gap-4">
@@ -688,6 +865,7 @@ async function renderFinanceiroGeral() {
         <p class="text-sm text-gray-500 mb-1">Saldo Geral Disponível</p>
         <p class="text-3xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>
       </div>
+      ${podeGerir ? `
       <div class="flex gap-2">
         <button onclick="openLancamentoManualModal('entrada')" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
           <i class="fas fa-plus mr-1"></i> Lançamento manual
@@ -695,17 +873,28 @@ async function renderFinanceiroGeral() {
         <button onclick="openImportarNfpModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">
           <i class="fas fa-file-import mr-1"></i> Importar planilha da NFP
         </button>
-      </div>
+      </div>` : ''}
     </div>
+
     <div class="gs-card p-5 mb-6">
-      <h3 class="font-semibold text-gray-700 mb-1">Importações da planilha NFP</h3>
+      <h3 class="font-semibold text-gray-700 mb-2"><i class="fas fa-magnifying-glass mr-1 text-gray-400"></i>Buscar um registro específico</h3>
+      <p class="text-xs text-gray-500 mb-3">Busque por CNPJ do emitente, nome do emitente ou número da nota fiscal — em vez de listar todos os lançamentos do Painel Geral.</p>
+      <form id="form-busca-geral" class="flex gap-2">
+        <input name="q" placeholder="CNPJ, emitente ou número da NF..." class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Buscar</button>
+      </form>
+      <div id="resultado-busca-geral" class="mt-4"></div>
+    </div>
+
+    <div class="gs-card p-5">
+      <h3 class="font-semibold text-gray-700 mb-1">Status das importações da planilha NFP</h3>
       <p class="text-xs text-gray-500 mb-3">O Painel Geral só recebe entradas pela importação da planilha de créditos exportada do site da Nota Fiscal Paulista. Reimportar o mesmo arquivo atualizado não duplica lançamentos já processados.</p>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead><tr class="text-left text-gray-500 border-b">
             <th class="py-2 pr-3">Data</th><th class="py-2 pr-3">Arquivo</th><th class="py-2 pr-3">Linhas no arquivo</th>
             <th class="py-2 pr-3">Elegíveis</th><th class="py-2 pr-3">Novas</th><th class="py-2 pr-3">Duplicadas</th>
-            <th class="py-2 pr-3">Ignoradas</th><th class="py-2 pr-3">Valor importado</th><th class="py-2 pr-3">Por</th>
+            <th class="py-2 pr-3">Ignoradas</th><th class="py-2 pr-3">Valor importado</th><th class="py-2 pr-3">Por</th><th class="py-2 pr-3">Planilha</th>
           </tr></thead>
           <tbody>
             ${importacoes.map(i => `
@@ -719,15 +908,54 @@ async function renderFinanceiroGeral() {
                 <td class="py-2 pr-3 text-gray-400">${i.linhas_ignoradas_zero_ou_a_calcular}</td>
                 <td class="py-2 pr-3 font-medium">${fmtMoney(i.valor_total_importado)}</td>
                 <td class="py-2 pr-3">${i.importado_por_nome}</td>
-              </tr>`).join('') || '<tr><td colspan="9" class="py-3 text-gray-400 text-sm">Nenhuma importação realizada ainda.</td></tr>'}
+                <td class="py-2 pr-3">${i.arquivo_original_key ? `<a href="/api/financeiro/geral/importacoes/${i.id}/arquivo" class="text-brand-600 hover:underline text-xs font-medium"><i class="fas fa-download mr-1"></i>Baixar</a>` : '<span class="text-xs text-gray-300">-</span>'}</td>
+              </tr>`).join('') || '<tr><td colspan="10" class="py-3 text-gray-400 text-sm">Nenhuma importação realizada ainda.</td></tr>'}
           </tbody>
         </table>
       </div>
-    </div>
-    <div class="gs-card p-5">
-      <h3 class="font-semibold text-gray-700 mb-3">Histórico Geral</h3>
-      ${renderLancamentosTable(lancamentosData.data, { permitirEdicaoManual: true })}
     </div>`;
+
+  document.getElementById('form-busca-geral').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = new FormData(e.target).get('q');
+    const container = document.getElementById('resultado-busca-geral');
+    container.innerHTML = '<p class="text-gray-400 text-sm"><i class="fas fa-spinner fa-spin mr-1"></i>Buscando...</p>';
+    try {
+      const { data } = await axios.get('/api/financeiro/geral/buscar', { params: { q } });
+      const { creditosNfp, lancamentosManuais } = data.data;
+      if (!creditosNfp.length && !lancamentosManuais.length) {
+        container.innerHTML = '<p class="text-gray-400 text-sm">Nenhum registro encontrado.</p>';
+        return;
+      }
+      container.innerHTML = `
+        ${creditosNfp.length ? `
+        <div class="overflow-x-auto mb-3">
+          <table class="w-full text-sm">
+            <thead><tr class="text-left text-gray-500 border-b">
+              <th class="py-2 pr-3">CNPJ</th><th class="py-2 pr-3">Emitente</th><th class="py-2 pr-3">NF</th>
+              <th class="py-2 pr-3">Emissão</th><th class="py-2 pr-3">Crédito</th><th class="py-2 pr-3">Situação</th><th class="py-2 pr-3">Status</th>
+            </tr></thead>
+            <tbody>
+              ${creditosNfp.map(cr => `
+                <tr class="border-b last:border-0">
+                  <td class="py-2 pr-3">${cr.cnpj_emitente}</td>
+                  <td class="py-2 pr-3">${cr.emitente}</td>
+                  <td class="py-2 pr-3">${cr.numero_nf}</td>
+                  <td class="py-2 pr-3">${cr.data_emissao}</td>
+                  <td class="py-2 pr-3 font-medium">${fmtMoney(cr.creditos)}</td>
+                  <td class="py-2 pr-3 text-xs text-gray-500">${cr.situacao_credito}</td>
+                  <td class="py-2 pr-3">${statusBadge(cr.lancamento_status)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+        ${lancamentosManuais.length ? `
+        <h4 class="text-xs font-semibold text-gray-500 uppercase mt-2 mb-1">Lançamentos manuais</h4>
+        ${renderLancamentosTable(lancamentosManuais, { permitirEdicaoManual: podeGerir })}` : ''}`;
+    } catch (err) {
+      container.innerHTML = `<p class="text-red-500 text-sm">${apiErr(err)}</p>`;
+    }
+  });
 }
 
 function openLancamentoManualModal(direcaoInicial) {
@@ -875,6 +1103,7 @@ async function renderRepasses() {
     if (l.tipo === 'repasse_geral_nucleo') return isAdmin();
     return isGlobal();
   }
+  const podeExecutar = isAdmin() || isFinanceiro();
   const tipoLabel = { repasse_geral_nucleo: 'Geral → Núcleo', repasse_nucleo_projeto: 'Núcleo → Projeto' };
 
   document.getElementById('page-content').innerHTML = `
@@ -904,7 +1133,7 @@ async function renderRepasses() {
                     <button onclick="rejeitarRepasse(${l.id})" class="text-red-600 hover:underline text-xs font-medium">Rejeitar</button>
                   ` : ''}
                   ${l.status === 'pendente' && !podeAprovar(l) ? `<span class="text-xs text-gray-400 italic">Aguardando Admin</span>` : ''}
-                  ${l.status === 'aprovado' && isAdmin() ? `<button onclick="openExecutarRepasseModal(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Executar</button>` : ''}
+                  ${l.status === 'aprovado' && podeExecutar ? `<button onclick="openExecutarRepasseModal(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Executar</button>` : ''}
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -934,23 +1163,32 @@ async function rejeitarRepasse(id) {
 function openExecutarRepasseModal(id) {
   openModal(`
     <h3 class="text-lg font-bold text-gray-800 mb-4">Executar Repasse</h3>
-    <p class="text-xs text-gray-500 mb-3">Apenas o Administrador pode executar, anexando o comprovante bancário.</p>
-    <form id="form-executar" enctype="multipart/form-data" class="space-y-3">
-      <input type="file" name="comprovante_bancario" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+    <p class="text-sm text-gray-600 mb-3">Não é mais necessário anexar comprovante bancário. Ao executar, o sistema gera automaticamente uma <strong>fatura</strong> para ser enviada ao coordenador do núcleo responsável.</p>
+    <form id="form-executar" class="space-y-3">
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">E-mail para envio da fatura (opcional)</label>
+        <input type="email" name="enviar_para" placeholder="coordenador@email.com" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Executar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-file-invoice mr-1"></i>Executar e gerar fatura</button>
       </div>
     </form>`);
 
   document.getElementById('form-executar').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const formData = new FormData(e.target);
+    const body = Object.fromEntries(new FormData(e.target).entries());
     try {
-      await axios.post(`/api/financeiro/repasses/${id}/executar`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const { data } = await axios.post(`/api/financeiro/repasses/${id}/executar`, body);
       closeModal();
-      toast('Repasse executado com sucesso.');
-      renderRepasses();
+      const faturaId = data.data.fatura_id;
+      openModal(`
+        <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-circle-check text-emerald-500 mr-1"></i>Repasse executado</h3>
+        <p class="text-sm text-gray-600 mb-4">Fatura <strong>${data.data.numero}</strong> gerada com sucesso.</p>
+        <div class="flex justify-end gap-2">
+          ${faturaId ? `<a href="/api/financeiro/faturas/${faturaId}" target="_blank" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-eye mr-1"></i>Ver / Imprimir Fatura</a>` : ''}
+          <button onclick="closeModal(); renderRepasses();" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg">Fechar</button>
+        </div>`);
     } catch (err) { toast(apiErr(err), 'error'); }
   });
 }
@@ -1061,7 +1299,7 @@ function openCreateUsuarioModal() {
       <div>
         <label class="block text-sm text-gray-600 mb-1">Papel</label>
         <select name="role" id="role-select" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
-          ${isAdmin() ? '<option value="admin">Administrador</option><option value="coord_geral">Coordenador Geral</option>' : ''}
+          ${isAdmin() ? '<option value="admin">Administrador</option><option value="coord_geral">Coordenador Geral</option><option value="financeiro">Financeiro</option>' : ''}
           <option value="coord_nucleo">Coordenador de Núcleo</option>
           <option value="articulador">Articulador</option>
         </select>
@@ -1123,7 +1361,7 @@ function openEditUsuarioModal(id) {
       <div>
         <label class="block text-sm text-gray-600 mb-1">Papel</label>
         <select name="role" id="edit-role-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
-          ${isAdmin() ? `<option value="admin" ${papelAtual.role === 'admin' ? 'selected' : ''}>Administrador</option><option value="coord_geral" ${papelAtual.role === 'coord_geral' ? 'selected' : ''}>Coordenador Geral</option>` : ''}
+          ${isAdmin() ? `<option value="admin" ${papelAtual.role === 'admin' ? 'selected' : ''}>Administrador</option><option value="coord_geral" ${papelAtual.role === 'coord_geral' ? 'selected' : ''}>Coordenador Geral</option><option value="financeiro" ${papelAtual.role === 'financeiro' ? 'selected' : ''}>Financeiro</option>` : ''}
           <option value="coord_nucleo" ${papelAtual.role === 'coord_nucleo' ? 'selected' : ''}>Coordenador de Núcleo</option>
           <option value="articulador" ${papelAtual.role === 'articulador' ? 'selected' : ''}>Articulador</option>
         </select>

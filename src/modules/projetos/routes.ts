@@ -175,6 +175,79 @@ projetos.post('/:projetoId/galeria', requireRole('admin', 'coord_geral', 'coord_
   return okResponse(c, { id: result.meta.last_row_id, r2_key: key, legenda }, 201)
 })
 
+// ===== ARQUIVAR OU EXCLUIR PROJETO =====
+//
+// Mesma regra dos núcleos: um projeto que já teve movimentação financeira
+// (repasses recebidos, saídas/pagamentos com comprovantes) precisa ter o
+// saldo ZERADO antes de poder ser arquivado — nunca excluído fisicamente,
+// para preservar o histórico/comprovantes. Um projeto SEM nenhum lançamento
+// financeiro pode ser excluído de verdade.
+projetos.delete('/:projetoId', requireRole('admin', 'coord_geral', 'coord_nucleo'), async (c) => {
+  const actor = c.get('user')
+  const projetoId = Number(c.req.param('projetoId'))
+
+  const projeto = await c.env.DB.prepare('SELECT * FROM projetos WHERE id = ?').bind(projetoId).first<any>()
+  if (!projeto) return errorResponse(c, 404, 'Projeto não encontrado.')
+  if (projeto.arquivado_em) return errorResponse(c, 409, 'Este projeto já está arquivado.')
+
+  const hasAccess = await userCanManageNucleo(actor, projeto.nucleo_id)
+  if (!hasAccess) return errorResponse(c, 403, 'Você não tem acesso a este projeto.')
+
+  const saldoRow = await c.env.DB.prepare('SELECT saldo FROM saldo_projeto WHERE projeto_id = ?')
+    .bind(projetoId)
+    .first<{ saldo: number }>()
+  const saldoAtual = saldoRow?.saldo ?? 0
+
+  const possuiHistoricoFinanceiro = await c.env.DB.prepare(
+    'SELECT 1 FROM financeiro_lancamentos WHERE projeto_id = ? LIMIT 1'
+  )
+    .bind(projetoId)
+    .first()
+
+  if (possuiHistoricoFinanceiro) {
+    if (saldoAtual !== 0) {
+      return errorResponse(
+        c,
+        422,
+        `Este projeto possui saldo de R$ ${saldoAtual.toFixed(2)}. Zere o saldo antes de arquivar. Projetos com histórico financeiro/comprovantes não podem ser excluídos, apenas arquivados.`
+      )
+    }
+
+    await c.env.DB.prepare(
+      'UPDATE projetos SET ativo = 0, arquivado_em = CURRENT_TIMESTAMP, arquivado_por = ? WHERE id = ?'
+    )
+      .bind(actor.sub, projetoId)
+      .run()
+
+    await logAudit(c, {
+      userId: actor.sub,
+      acao: 'projeto.arquivar',
+      entidade: 'projetos',
+      entidadeId: projetoId,
+      payload: { motivo: 'possui_historico_financeiro' }
+    })
+
+    return okResponse(c, {
+      message: `Projeto "${projeto.nome}" arquivado. Como possui histórico financeiro, o registro foi mantido de forma inativa para preservar a rastreabilidade.`,
+      arquivado: true
+    })
+  }
+
+  // Sem histórico financeiro: exclusão física (remove galeria vinculada antes, se houver).
+  await c.env.DB.prepare('DELETE FROM projeto_galeria WHERE projeto_id = ?').bind(projetoId).run()
+  await c.env.DB.prepare('DELETE FROM projetos WHERE id = ?').bind(projetoId).run()
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'projeto.excluir',
+    entidade: 'projetos',
+    entidadeId: projetoId,
+    payload: { nome: projeto.nome }
+  })
+
+  return okResponse(c, { message: `Projeto "${projeto.nome}" excluído permanentemente.`, arquivado: false })
+})
+
 // ===== SERVIR IMAGEM DA GALERIA (autenticado) =====
 projetos.get('/galeria/:imageId/arquivo', async (c) => {
   const imageId = Number(c.req.param('imageId'))

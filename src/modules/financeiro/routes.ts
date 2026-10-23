@@ -7,24 +7,26 @@ import { generateRandomKey } from '../../utils/crypto'
 import { parseCreditosNFP } from '../../utils/csv-nfp'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, isGlobalUser, getScopedNucleoIds, isAdmin } from '../../middlewares/rbac'
+import { requireRole, getScopedNucleoIds, isAdmin, isFinanceiro, hasFinanceiroFullAccess } from '../../middlewares/rbac'
 
 const financeiro = new Hono<AppEnv>()
 
 financeiro.use('*', authMiddleware)
 
-// Acesso aos painéis financeiros de Núcleo/Projeto: admin, coord_geral e o coord_nucleo
-// do respectivo escopo. Articulador NUNCA tem acesso financeiro (isGlobalUser não o inclui
-// e ele nunca possui escopo coord_nucleo) — bloqueado por definição.
+// Acesso aos painéis financeiros de Núcleo/Projeto: admin, coord_geral, financeiro (visão 360°)
+// e o coord_nucleo do respectivo escopo. Articulador NUNCA tem acesso financeiro (isGlobalUser
+// não o inclui e ele nunca possui escopo coord_nucleo) — bloqueado por definição.
 async function userCanAccessNucleo(user: any, nucleoId: number): Promise<boolean> {
-  if (isGlobalUser(user)) return true
+  if (hasFinanceiroFullAccess(user)) return true
   return getScopedNucleoIds(user).includes(nucleoId)
 }
 
-// Gestão de saídas no Projeto: admin OU coord_nucleo do núcleo dono do projeto.
-// Coord_geral e Articulador NÃO lançam saídas (apenas o Coordenador de Núcleo gere os recursos do dia a dia).
+// Gestão de saídas no Projeto: admin, financeiro (quando ele próprio executa o pagamento)
+// OU coord_nucleo do núcleo dono do projeto. Coord_geral e Articulador NÃO lançam saídas
+// (apenas o Coordenador de Núcleo gere os recursos do dia a dia, e o Financeiro quando
+// é ele quem está efetivamente pagando).
 function userCanManageSaidaProjeto(user: any, nucleoId: number): boolean {
-  if (isAdmin(user)) return true
+  if (isAdmin(user) || isFinanceiro(user)) return true
   return user.roles?.some((r: any) => r.role === 'coord_nucleo' && r.escopo_id === nucleoId)
 }
 
@@ -93,15 +95,22 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'coord_geral'), asyn
     return errorResponse(c, 422, resultado.erroFormato)
   }
 
+  // Guarda o arquivo original no R2 para permitir "baixar a planilha" depois
+  // (auditoria/conferência), sem precisar listar as linhas individuais na tela.
+  const arquivoKey = `importacoes-nfp/${generateRandomKey()}-${nomeArquivo}`
+  await c.env.R2.put(arquivoKey, await arquivo.arrayBuffer(), {
+    httpMetadata: { contentType: arquivo.type || 'text/csv' }
+  })
+
   if (resultado.linhasElegiveis.length === 0) {
     // Ainda registra a importação (com zero linhas novas) para ficar no histórico,
     // mesmo quando o arquivo só contém notas "A Calcular"/zeradas.
     const importRow = await c.env.DB.prepare(
       `INSERT INTO financeiro_importacoes_nfp
-       (nome_arquivo, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
-       VALUES (?, ?, 0, 0, 0, ?, 0, ?)`
+       (nome_arquivo, arquivo_original_key, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
+       VALUES (?, ?, ?, 0, 0, 0, ?, 0, ?)`
     )
-      .bind(nomeArquivo, resultado.totalLinhasArquivo, resultado.linhasIgnoradasZeroOuACalcular, actor.sub)
+      .bind(nomeArquivo, arquivoKey, resultado.totalLinhasArquivo, resultado.linhasIgnoradasZeroOuACalcular, actor.sub)
       .run()
 
     await logAudit(c, {
@@ -140,11 +149,12 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'coord_geral'), asyn
   // 1) Cria o registro da importação primeiro (precisamos do id para vincular os créditos).
   const importRow = await c.env.DB.prepare(
     `INSERT INTO financeiro_importacoes_nfp
-     (nome_arquivo, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     (nome_arquivo, arquivo_original_key, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       nomeArquivo,
+      arquivoKey,
       resultado.totalLinhasArquivo,
       resultado.linhasElegiveis.length,
       linhasNovas.length,
@@ -351,8 +361,8 @@ financeiro.delete('/geral/lancamentos-manuais/:id', requireRole('admin'), async 
   return okResponse(c, { id, status: 'cancelado' })
 })
 
-// Histórico de importações realizadas (admin, coord_geral)
-financeiro.get('/geral/importacoes', requireRole('admin', 'coord_geral'), async (c) => {
+// Histórico de importações realizadas (admin, coord_geral, financeiro)
+financeiro.get('/geral/importacoes', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT i.*, u.nome AS importado_por_nome
      FROM financeiro_importacoes_nfp i
@@ -362,7 +372,31 @@ financeiro.get('/geral/importacoes', requireRole('admin', 'coord_geral'), async 
   return okResponse(c, results)
 })
 
-financeiro.get('/geral/saldo', requireRole('admin', 'coord_geral'), async (c) => {
+// Baixa o arquivo original (CSV) de uma importação NFP — para conferência/auditoria,
+// sem precisar listar as milhares de linhas individuais na tela.
+financeiro.get('/geral/importacoes/:id/arquivo', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
+  const id = Number(c.req.param('id'))
+  const importacao = await c.env.DB.prepare('SELECT nome_arquivo, arquivo_original_key FROM financeiro_importacoes_nfp WHERE id = ?')
+    .bind(id)
+    .first<{ nome_arquivo: string; arquivo_original_key: string | null }>()
+
+  if (!importacao) return errorResponse(c, 404, 'Importação não encontrada.')
+  if (!importacao.arquivo_original_key) {
+    return errorResponse(c, 404, 'O arquivo original desta importação não está disponível (importado antes deste recurso existir).')
+  }
+
+  const object = await c.env.R2.get(importacao.arquivo_original_key)
+  if (!object) return errorResponse(c, 404, 'Arquivo não encontrado no armazenamento.')
+
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType || 'text/csv',
+      'Content-Disposition': `attachment; filename="${importacao.nome_arquivo.replace(/"/g, '')}"`
+    }
+  })
+})
+
+financeiro.get('/geral/saldo', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
   const row = await c.env.DB.prepare('SELECT saldo FROM saldo_geral').first<{ saldo: number }>()
   return okResponse(c, { saldo: row?.saldo ?? 0 })
 })
@@ -372,6 +406,41 @@ financeiro.get('/geral/lancamentos', requireRole('admin', 'coord_geral'), async 
     `SELECT * FROM financeiro_lancamentos WHERE nivel = 'geral' ORDER BY created_at DESC`
   ).all()
   return okResponse(c, results)
+})
+
+// Busca pontual de um registro específico no financeiro geral — por CNPJ, nome do
+// emitente, número da NF ou id do lançamento. Usado pela tela de Financeiro Geral
+// em vez de listar todos os registros de uma vez (que pode somar milhares de linhas
+// vindas da importação da NFP).
+financeiro.get('/geral/buscar', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
+  const termo = (c.req.query('q') || '').trim()
+  if (!termo || termo.length < 2) {
+    return errorResponse(c, 422, 'Informe ao menos 2 caracteres para buscar.')
+  }
+
+  const like = `%${termo}%`
+  const { results: creditos } = await c.env.DB.prepare(
+    `SELECT cr.*, l.status AS lancamento_status
+     FROM financeiro_creditos_nfp cr
+     JOIN financeiro_lancamentos l ON l.id = cr.lancamento_id
+     WHERE cr.cnpj_emitente LIKE ? OR cr.emitente LIKE ? OR cr.numero_nf LIKE ?
+     ORDER BY cr.created_at DESC
+     LIMIT 100`
+  )
+    .bind(like, like, like)
+    .all()
+
+  // Também busca em lançamentos manuais/outros tipos pela finalidade (ex.: estorno, taxa).
+  const { results: manuais } = await c.env.DB.prepare(
+    `SELECT * FROM financeiro_lancamentos
+     WHERE nivel = 'geral' AND tipo IN ('entrada_manual','saida_manual') AND finalidade LIKE ?
+     ORDER BY created_at DESC
+     LIMIT 50`
+  )
+    .bind(like)
+    .all()
+
+  return okResponse(c, { creditosNfp: creditos, lancamentosManuais: manuais })
 })
 
 // ================= PAINEL DO NÚCLEO =================
@@ -433,7 +502,7 @@ financeiro.get('/projeto/:projetoId/lancamentos', async (c) => {
 // Saída de pagamento no Projeto — Admin OU Coordenador de Núcleo (do núcleo dono do projeto),
 // com comprovante bancário E fiscal obrigatórios. O Coordenador de Núcleo é quem faz a gestão
 // diária dos recursos do seu núcleo/projetos, por isso também pode lançar saídas.
-financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo'), async (c) => {
+financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const projetoId = Number(c.req.param('projetoId'))
 
@@ -627,10 +696,14 @@ financeiro.post('/repasses/:id/rejeitar', requireRole('admin', 'coord_geral'), a
   return okResponse(c, { message: 'Repasse rejeitado.' })
 })
 
-// Executar repasse (SOMENTE ADMIN) — exige comprovante bancário, multipart/form-data
-financeiro.post('/repasses/:id/executar', requireRole('admin'), async (c) => {
+// Executar repasse (admin, financeiro) — NÃO exige mais comprovante bancário.
+// Em vez disso, o sistema gera uma FATURA (financeiro_faturas), documento simples
+// e imprimível (ver GET /financeiro/faturas/:id), para ser enviada ao coordenador
+// do núcleo responsável como registro formal da transferência.
+financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
+  const body = await c.req.json<{ enviar_para?: string }>().catch(() => ({} as any))
 
   const lancamento = await c.env.DB.prepare('SELECT * FROM financeiro_lancamentos WHERE id = ?').bind(id).first<any>()
   if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
@@ -641,26 +714,97 @@ financeiro.post('/repasses/:id/executar', requireRole('admin'), async (c) => {
     return errorResponse(c, 409, 'O repasse precisa estar aprovado antes de ser executado.')
   }
 
-  const formData = await c.req.formData().catch(() => null)
-  const comprovanteBancario = formData?.get('comprovante_bancario')
-  if (!isFormDataFile(comprovanteBancario)) {
-    return errorResponse(c, 422, 'Comprovante bancário é obrigatório para executar o repasse.')
-  }
-
-  const bancarioKey = await uploadComprovanteFile(c.env.R2, id, 'bancario', comprovanteBancario)
+  const numero = `FAT-${id}-${generateRandomKey().slice(0, 6).toUpperCase()}`
 
   await c.env.DB.batch([
     c.env.DB.prepare(
       `UPDATE financeiro_lancamentos SET status = 'executado', executado_por = ?, executado_em = CURRENT_TIMESTAMP WHERE id = ?`
     ).bind(actor.sub, id),
     c.env.DB.prepare(
-      'INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?)'
-    ).bind(id, 'bancario', bancarioKey, comprovanteBancario.name, actor.sub)
+      `INSERT INTO financeiro_faturas (lancamento_id, numero, nucleo_id, projeto_id, valor, finalidade, gerado_por, enviada_em, enviada_para)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id,
+      numero,
+      lancamento.nucleo_id,
+      lancamento.projeto_id,
+      lancamento.valor,
+      lancamento.finalidade,
+      actor.sub,
+      body.enviar_para ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
+      body.enviar_para || null
+    )
   ])
 
-  await logAudit(c, { userId: actor.sub, acao: 'financeiro.repasse.executar', entidade: 'financeiro_lancamentos', entidadeId: id })
+  const fatura = await c.env.DB.prepare('SELECT id FROM financeiro_faturas WHERE lancamento_id = ?').bind(id).first<{ id: number }>()
 
-  return okResponse(c, { message: 'Repasse executado com sucesso.' })
+  await logAudit(c, { userId: actor.sub, acao: 'financeiro.repasse.executar', entidade: 'financeiro_lancamentos', entidadeId: id, payload: { numero_fatura: numero } })
+
+  return okResponse(c, { message: 'Repasse executado com sucesso. Fatura gerada.', fatura_id: fatura?.id, numero })
+})
+
+// ================= FATURAS =================
+
+// Exibe a fatura como HTML simples, pronto para impressão/PDF pelo navegador
+// (Ctrl+P / Salvar como PDF). Acesso: admin, coord_geral, financeiro (visão 360°)
+// ou o coordenador do núcleo destinatário do repasse.
+financeiro.get('/faturas/:id', async (c) => {
+  const actor = c.get('user')
+  const id = Number(c.req.param('id'))
+
+  const fatura = await c.env.DB.prepare(
+    `SELECT f.*, u.nome AS gerado_por_nome, n.nome AS nucleo_nome, p.nome AS projeto_nome
+     FROM financeiro_faturas f
+     JOIN users u ON u.id = f.gerado_por
+     LEFT JOIN nucleos n ON n.id = f.nucleo_id
+     LEFT JOIN projetos p ON p.id = f.projeto_id
+     WHERE f.id = ?`
+  ).bind(id).first<any>()
+
+  if (!fatura) return errorResponse(c, 404, 'Fatura não encontrada.')
+  if (fatura.nucleo_id && !(await userCanAccessNucleo(actor, fatura.nucleo_id))) {
+    return errorResponse(c, 403, 'Sem acesso a esta fatura.')
+  }
+
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><title>Fatura ${fatura.numero}</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; color: #1f2937; }
+  h1 { font-size: 20px; border-bottom: 2px solid #0f766e; padding-bottom: 10px; }
+  .meta { color: #6b7280; font-size: 13px; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+  td, th { padding: 10px; border: 1px solid #e5e7eb; text-align: left; font-size: 14px; }
+  .valor { font-size: 24px; font-weight: bold; color: #0f766e; margin: 20px 0; }
+  @media print { button { display: none; } }
+</style></head>
+<body>
+  <h1>Fatura de Repasse — ${fatura.numero}</h1>
+  <p class="meta">Gestão Social (NFP) — Gerada em ${new Date(fatura.created_at).toLocaleString('pt-BR')} por ${fatura.gerado_por_nome}</p>
+  <table>
+    <tr><th>Destino</th><td>${fatura.projeto_nome ? `Projeto: ${fatura.projeto_nome}` : `Núcleo: ${fatura.nucleo_nome || '-'}`}</td></tr>
+    <tr><th>Finalidade</th><td>${fatura.finalidade || '-'}</td></tr>
+  </table>
+  <p class="valor">Valor: ${Number(fatura.valor).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>
+  <button onclick="window.print()">Imprimir / Salvar como PDF</button>
+</body></html>`
+
+  return c.html(html)
+})
+
+// Busca a fatura vinculada a um lançamento (usado pelo frontend após executar o repasse).
+financeiro.get('/lancamentos/:id/fatura', async (c) => {
+  const actor = c.get('user')
+  const id = Number(c.req.param('id'))
+
+  const lancamento = await c.env.DB.prepare('SELECT nucleo_id FROM financeiro_lancamentos WHERE id = ?').bind(id).first<any>()
+  if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
+  if (lancamento.nucleo_id && !(await userCanAccessNucleo(actor, lancamento.nucleo_id))) {
+    return errorResponse(c, 403, 'Sem acesso a este lançamento.')
+  }
+
+  const fatura = await c.env.DB.prepare('SELECT * FROM financeiro_faturas WHERE lancamento_id = ?').bind(id).first()
+  if (!fatura) return errorResponse(c, 404, 'Nenhuma fatura gerada para este lançamento.')
+  return okResponse(c, fatura)
 })
 
 // ================= COMPROVANTES =================
@@ -675,7 +819,7 @@ financeiro.get('/lancamentos/:id/comprovantes', async (c) => {
   if (lancamento.nucleo_id && !(await userCanAccessNucleo(actor, lancamento.nucleo_id))) {
     return errorResponse(c, 403, 'Sem acesso a este lançamento.')
   }
-  if (lancamento.nivel === 'geral' && !isGlobalUser(actor)) {
+  if (lancamento.nivel === 'geral' && !hasFinanceiroFullAccess(actor)) {
     return errorResponse(c, 403, 'Sem acesso a este lançamento.')
   }
 
@@ -696,20 +840,24 @@ financeiro.get('/comprovantes/:id/arquivo', async (c) => {
   const comprovante = await c.env.DB.prepare('SELECT * FROM comprovantes WHERE id = ?').bind(id).first<any>()
   if (!comprovante) return errorResponse(c, 404, 'Comprovante não encontrado.')
 
-  // Mesma regra de acesso usada para listar comprovantes de um lançamento —
-  // sem isso, qualquer usuário autenticado poderia baixar qualquer comprovante
-  // pelo id, mesmo fora do seu escopo de núcleo/projeto.
+  // Regra de negócio: o comprovante é ANEXADO pelo Coordenador de Núcleo (ou pelo
+  // Financeiro, quando ele próprio executa um pagamento), mas o DOWNLOAD do arquivo
+  // fica reservado ao Administrador e ao papel Financeiro (visão 360°) — não ao
+  // próprio coord_nucleo que o enviou, nem a coord_geral/articulador. Isso garante
+  // que o fluxo seja "coordenador sobe o arquivo → administrador/financeiro confere
+  // e baixa". A listagem de METADADOS (verComprovantes) continua visível a todo
+  // escopo de núcleo, apenas o binário em si é restrito aqui.
   const lancamento = await c.env.DB.prepare('SELECT nucleo_id, nivel FROM financeiro_lancamentos WHERE id = ?')
     .bind(comprovante.lancamento_id)
     .first<any>()
   if (!lancamento) return errorResponse(c, 404, 'Lançamento associado não encontrado.')
-  if (lancamento.nucleo_id && !(await userCanAccessNucleo(actor, lancamento.nucleo_id))) {
-    return errorResponse(c, 403, 'Sem acesso a este comprovante.')
-  }
-  if (lancamento.nivel === 'geral' && !isGlobalUser(actor)) {
-    return errorResponse(c, 403, 'Sem acesso a este comprovante.')
+  if (!isAdmin(actor) && !isFinanceiro(actor)) {
+    return errorResponse(c, 403, 'Apenas o Administrador ou o papel Financeiro podem baixar comprovantes.')
   }
 
+  if (comprovante.arquivado_em) {
+    return errorResponse(c, 410, 'Este comprovante foi arquivado manualmente e o arquivo não está mais disponível para download. O registro permanece para fins de auditoria.')
+  }
   if (comprovante.expirado) {
     return errorResponse(c, 410, 'Este arquivo já expirou e foi removido do armazenamento 30 dias após o primeiro download. O registro do comprovante permanece para fins de auditoria.')
   }
@@ -741,6 +889,38 @@ financeiro.get('/comprovantes/:id/arquivo', async (c) => {
       'Content-Disposition': `attachment; filename="${nomeArquivo.replace(/"/g, '')}"`
     }
   })
+})
+
+// Arquivamento manual de comprovante (admin, financeiro) — ação deliberada de
+// "já conferi, pode arquivar": remove o binário do R2 desde já (sem esperar os
+// 30 dias pós-download) e marca arquivado_em/arquivado_por. O metadado nunca é
+// apagado, preservando o rastro de auditoria.
+financeiro.post('/comprovantes/:id/arquivar', requireRole('admin', 'financeiro'), async (c) => {
+  const actor = c.get('user')
+  const id = Number(c.req.param('id'))
+
+  const comprovante = await c.env.DB.prepare('SELECT * FROM comprovantes WHERE id = ?').bind(id).first<any>()
+  if (!comprovante) return errorResponse(c, 404, 'Comprovante não encontrado.')
+  if (comprovante.arquivado_em) return errorResponse(c, 409, 'Este comprovante já está arquivado.')
+
+  if (!comprovante.expirado) {
+    await c.env.R2.delete(comprovante.r2_key).catch(() => {})
+  }
+
+  await c.env.DB.prepare(
+    'UPDATE comprovantes SET arquivado_em = CURRENT_TIMESTAMP, arquivado_por = ? WHERE id = ?'
+  )
+    .bind(actor.sub, id)
+    .run()
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'financeiro.comprovante.arquivar',
+    entidade: 'comprovantes',
+    entidadeId: id
+  })
+
+  return okResponse(c, { message: 'Comprovante arquivado. O arquivo foi removido do armazenamento, o registro permanece para auditoria.' })
 })
 
 export default financeiro

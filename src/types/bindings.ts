@@ -8,7 +8,7 @@
 import type { AppDatabase } from '../platform/db'
 import type { AppBucket } from '../platform/storage'
 
-export type Role = 'admin' | 'coord_geral' | 'coord_nucleo' | 'articulador'
+export type Role = 'admin' | 'coord_geral' | 'coord_nucleo' | 'articulador' | 'financeiro'
 
 export interface JwtPayload {
   sub: number // user id

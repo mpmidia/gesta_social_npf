@@ -65,12 +65,28 @@ export function isArticulador(user: AppEnv['Variables']['user']): boolean {
   return user.roles.some((r) => r.role === 'articulador')
 }
 
+export function isFinanceiro(user: AppEnv['Variables']['user']): boolean {
+  return user.roles.some((r) => r.role === 'financeiro')
+}
+
 /**
- * Acesso de LEITURA institucional (Núcleos/Projetos): admin, coord_geral e articulador
- * enxergam tudo. coord_nucleo enxerga apenas os núcleos/projetos do seu escopo.
+ * Acesso de LEITURA institucional (Núcleos/Projetos): admin, coord_geral, articulador
+ * e financeiro enxergam tudo. coord_nucleo enxerga apenas os núcleos/projetos do seu escopo.
  * Usado para listagens onde o Articulador precisa visualizar núcleos/projetos
- * (para organizar campanhas/comunicação) mas SEM qualquer acesso financeiro.
+ * (para organizar campanhas/comunicação) e o Financeiro precisa ver todos os núcleos/
+ * projetos para ter visão 360° do financeiro, mas nenhum dos dois tem CRUD sobre eles.
  */
 export function hasBroadReadAccess(user: AppEnv['Variables']['user']): boolean {
-  return isGlobalUser(user) || isArticulador(user)
+  return isGlobalUser(user) || isArticulador(user) || isFinanceiro(user)
+}
+
+/**
+ * Visão 360° do Financeiro: admin, coord_geral e o papel dedicado "financeiro"
+ * enxergam TODOS os saldos/lançamentos/comprovantes de todos os níveis (Geral/
+ * Núcleo/Projeto), independente de escopo. O papel "financeiro" é somente para
+ * operações financeiras — não tem CRUD de núcleo/projeto/usuários nem acesso a
+ * comunicação.
+ */
+export function hasFinanceiroFullAccess(user: AppEnv['Variables']['user']): boolean {
+  return isGlobalUser(user) || isFinanceiro(user)
 }

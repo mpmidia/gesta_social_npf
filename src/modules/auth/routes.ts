@@ -119,15 +119,17 @@ auth.post('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), asyn
     return errorResponse(c, 422, 'Informe nome, e-mail, senha e papel (role).')
   }
 
-  const validRoles: Role[] = ['admin', 'coord_geral', 'coord_nucleo', 'articulador']
+  const validRoles: Role[] = ['admin', 'coord_geral', 'coord_nucleo', 'articulador', 'financeiro']
   if (!validRoles.includes(role)) {
     return errorResponse(c, 422, 'Papel inválido.')
   }
 
-  // Regra crítica: apenas admin pode criar outro admin ou coord_geral
+  // Regra crítica: apenas admin pode criar outro admin, coord_geral ou financeiro
+  // (o papel financeiro tem visão 360° de todas as operações financeiras, por isso
+  // é tratado com o mesmo nível de restrição de admin/coord_geral).
   const actorIsAdmin = isAdmin(actor)
-  if ((role === 'admin' || role === 'coord_geral') && !actorIsAdmin) {
-    return errorResponse(c, 403, 'Apenas administradores podem criar admin ou coordenador geral.')
+  if ((role === 'admin' || role === 'coord_geral' || role === 'financeiro') && !actorIsAdmin) {
+    return errorResponse(c, 403, 'Apenas administradores podem criar admin, coordenador geral ou financeiro.')
   }
 
   if (role === 'coord_nucleo' && !nucleo_id) {
@@ -297,10 +299,10 @@ auth.put('/usuarios/:id', authMiddleware, requireRole('admin', 'coord_geral'), a
   }
 
   if (role !== undefined) {
-    const validRoles: Role[] = ['admin', 'coord_geral', 'coord_nucleo', 'articulador']
+    const validRoles: Role[] = ['admin', 'coord_geral', 'coord_nucleo', 'articulador', 'financeiro']
     if (!validRoles.includes(role)) return errorResponse(c, 422, 'Papel inválido.')
-    if ((role === 'admin' || role === 'coord_geral') && !actorIsAdmin) {
-      return errorResponse(c, 403, 'Apenas administradores podem atribuir o papel admin ou coordenador geral.')
+    if ((role === 'admin' || role === 'coord_geral' || role === 'financeiro') && !actorIsAdmin) {
+      return errorResponse(c, 403, 'Apenas administradores podem atribuir o papel admin, coordenador geral ou financeiro.')
     }
     if (role === 'coord_nucleo' && !nucleo_id) {
       return errorResponse(c, 422, 'Para o papel coord_nucleo é obrigatório informar nucleo_id.')
@@ -385,7 +387,11 @@ const TABELAS_COM_REFERENCIA_A_USERS: Array<{ tabela: string; coluna: string }> 
   { tabela: 'audit_log', coluna: 'user_id' },
   { tabela: 'campanhas', coluna: 'criado_por' },
   { tabela: 'templates_mensagem', coluna: 'criado_por' },
-  { tabela: 'financeiro_importacoes_nfp', coluna: 'importado_por' }
+  { tabela: 'financeiro_importacoes_nfp', coluna: 'importado_por' },
+  { tabela: 'financeiro_faturas', coluna: 'gerado_por' },
+  { tabela: 'nucleos', coluna: 'arquivado_por' },
+  { tabela: 'projetos', coluna: 'arquivado_por' },
+  { tabela: 'comprovantes', coluna: 'arquivado_por' }
 ]
 
 async function usuarioPossuiHistorico(db: AppDatabase, userId: number): Promise<boolean> {
