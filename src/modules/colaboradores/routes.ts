@@ -4,7 +4,7 @@ import type { AppDatabase } from '../../platform/db'
 import { errorResponse, okResponse } from '../../utils/response'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, isGlobalUser, getScopedNucleoIds } from '../../middlewares/rbac'
+import { requireRole, isGlobalUser, isArticulador, getScopedNucleoIds } from '../../middlewares/rbac'
 
 const colaboradores = new Hono<AppEnv>()
 
@@ -24,7 +24,11 @@ colaboradores.get('/gestao', requireRole('admin', 'coord_geral', 'coord_nucleo',
   let baseQuery = 'SELECT * FROM colaboradores WHERE 1=1'
   const binds: any[] = []
 
-  if (!isGlobalUser(user)) {
+  // Admin, Coordenador Geral e Articulador enxergam os colaboradores de TODOS os
+  // núcleos (o Articulador precisa de uma visão ampla para poder articular com
+  // todos ou filtrar por núcleo — ver query param nucleo_id abaixo). Coordenador
+  // de Núcleo só vê os colaboradores cadastrados no(s) seu(s) núcleo(s).
+  if (!isGlobalUser(user) && !isArticulador(user)) {
     const scopedIds = getScopedNucleoIds(user)
     if (scopedIds.length === 0) return okResponse(c, [])
     baseQuery += ` AND nucleo_id IN (${scopedIds.map(() => '?').join(',')})`

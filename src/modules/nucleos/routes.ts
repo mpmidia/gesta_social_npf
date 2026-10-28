@@ -2,9 +2,10 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../../types/bindings'
 import { errorResponse, okResponse } from '../../utils/response'
 import { slugify, generateRandomKey } from '../../utils/crypto'
+import { hashPassword } from '../../utils/crypto'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, requireNucleoAccess, hasBroadReadAccess, getScopedNucleoIds } from '../../middlewares/rbac'
+import { requireRole, requireNucleoAccess, hasBroadReadAccess, getScopedNucleoIds, isAdmin } from '../../middlewares/rbac'
 
 const nucleos = new Hono<AppEnv>()
 
@@ -120,31 +121,104 @@ nucleos.put('/:nucleoId', requireRole('admin', 'coord_geral'), async (c) => {
 })
 
 // ===== CADASTRAR COORDENADOR DE NÚCLEO (admin, coord_geral) =====
+//
+// O Coordenador Geral cadastra o Coordenador de Núcleo diretamente pelo
+// painel do próprio núcleo (não precisa passar pela tela de Usuários &
+// Permissões, que agora é exclusiva do Administrador). Dois modos:
+//
+//   modo 'novo': cria um usuário novo (nome/email/senha) já com o papel
+//   coord_nucleo escopado a este núcleo.
+//
+//   modo 'existente': reaproveita um usuário já cadastrado (localizado
+//   pelo e-mail) e REATRIBUI o papel dele para coord_nucleo deste núcleo
+//   — como cada usuário tem exatamente um papel (user_roles.user_id é
+//   UNIQUE), isso substitui qualquer papel anterior. Por segurança, só o
+//   Administrador pode fazer essa reatribuição quando o usuário já é
+//   admin, coord_geral ou financeiro (um Coordenador Geral não pode
+//   "rebaixar" esses papéis sem querer).
 nucleos.post('/:nucleoId/coordenadores', requireRole('admin', 'coord_geral'), async (c) => {
   const actor = c.get('user')
   const nucleoId = Number(c.req.param('nucleoId'))
-  const body = await c.req.json<{ user_id?: number }>().catch(() => ({} as any))
-  const { user_id } = body
+  const body = await c.req.json<{
+    modo?: 'novo' | 'existente'
+    nome?: string
+    email?: string
+    senha?: string
+  }>().catch(() => ({} as any))
+  const { modo, nome, email, senha } = body
 
-  if (!user_id) return errorResponse(c, 422, 'Informe user_id do coordenador.')
-
-  const nucleo = await c.env.DB.prepare('SELECT id FROM nucleos WHERE id = ?').bind(nucleoId).first()
+  const nucleo = await c.env.DB.prepare('SELECT id, nome FROM nucleos WHERE id = ?').bind(nucleoId).first<any>()
   if (!nucleo) return errorResponse(c, 404, 'Núcleo não encontrado.')
 
-  const user = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(user_id).first()
-  if (!user) return errorResponse(c, 404, 'Usuário não encontrado.')
+  if (modo === 'existente') {
+    if (!email) return errorResponse(c, 422, 'Informe o e-mail do usuário existente.')
 
-  const already = await c.env.DB.prepare(
-    "SELECT id FROM user_roles WHERE user_id = ? AND role = 'coord_nucleo' AND escopo_id = ?"
-  )
-    .bind(user_id, nucleoId)
+    const user = await c.env.DB.prepare(
+      'SELECT id, nome FROM users WHERE email = ? AND excluido_em IS NULL'
+    )
+      .bind(email.toLowerCase().trim())
+      .first<{ id: number; nome: string }>()
+    if (!user) return errorResponse(c, 404, 'Não existe usuário ativo com este e-mail.')
+
+    const currentRole = await c.env.DB.prepare('SELECT role FROM user_roles WHERE user_id = ?')
+      .bind(user.id)
+      .first<{ role: string }>()
+
+    if (currentRole && ['admin', 'coord_geral', 'financeiro'].includes(currentRole.role) && !isAdmin(actor)) {
+      return errorResponse(
+        c,
+        403,
+        `Apenas o Administrador pode reatribuir o papel de um usuário que já é ${currentRole.role}.`
+      )
+    }
+
+    if (currentRole?.role === 'coord_nucleo') {
+      const mesmoNucleo = await c.env.DB.prepare(
+        "SELECT id FROM user_roles WHERE user_id = ? AND escopo_id = ?"
+      ).bind(user.id, nucleoId).first()
+      if (mesmoNucleo) return errorResponse(c, 409, 'Este usuário já é coordenador deste núcleo.')
+    }
+
+    await c.env.DB.prepare('DELETE FROM user_roles WHERE user_id = ?').bind(user.id).run()
+    await c.env.DB.prepare(
+      "INSERT INTO user_roles (user_id, role, escopo_tipo, escopo_id) VALUES (?, 'coord_nucleo', 'nucleo', ?)"
+    )
+      .bind(user.id, nucleoId)
+      .run()
+
+    await logAudit(c, {
+      userId: actor.sub,
+      acao: 'nucleo.coordenador.adicionar',
+      entidade: 'nucleos',
+      entidadeId: nucleoId,
+      payload: { user_id: user.id, modo: 'existente', papelAnterior: currentRole?.role ?? null }
+    })
+
+    return okResponse(c, { message: `${user.nome} agora é coordenador(a) de "${nucleo.nome}".` }, 201)
+  }
+
+  // modo 'novo' (padrão): cria um usuário já como coordenador deste núcleo.
+  if (!nome || !email || !senha) {
+    return errorResponse(c, 422, 'Informe nome, e-mail e senha do novo coordenador.')
+  }
+
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ? AND excluido_em IS NULL')
+    .bind(email.toLowerCase().trim())
     .first()
-  if (already) return errorResponse(c, 409, 'Usuário já é coordenador deste núcleo.')
+  if (existing) {
+    return errorResponse(c, 409, 'Já existe um usuário com este e-mail. Use a opção "usuário existente" para reaproveitá-lo.')
+  }
+
+  const senhaHash = await hashPassword(senha)
+  const insertUser = await c.env.DB.prepare('INSERT INTO users (nome, email, senha_hash) VALUES (?, ?, ?)')
+    .bind(nome, email.toLowerCase().trim(), senhaHash)
+    .run()
+  const novoUserId = insertUser.meta.last_row_id as number
 
   await c.env.DB.prepare(
     "INSERT INTO user_roles (user_id, role, escopo_tipo, escopo_id) VALUES (?, 'coord_nucleo', 'nucleo', ?)"
   )
-    .bind(user_id, nucleoId)
+    .bind(novoUserId, nucleoId)
     .run()
 
   await logAudit(c, {
@@ -152,10 +226,10 @@ nucleos.post('/:nucleoId/coordenadores', requireRole('admin', 'coord_geral'), as
     acao: 'nucleo.coordenador.adicionar',
     entidade: 'nucleos',
     entidadeId: nucleoId,
-    payload: { user_id }
+    payload: { user_id: novoUserId, modo: 'novo', nome, email }
   })
 
-  return okResponse(c, { message: 'Coordenador vinculado ao núcleo.' }, 201)
+  return okResponse(c, { message: `${nome} cadastrado(a) como coordenador(a) de "${nucleo.nome}".` }, 201)
 })
 
 // ===== REMOVER COORDENADOR DE NÚCLEO (admin, coord_geral) =====

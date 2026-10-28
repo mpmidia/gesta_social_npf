@@ -13,9 +13,10 @@ const financeiro = new Hono<AppEnv>()
 
 financeiro.use('*', authMiddleware)
 
-// Acesso aos painéis financeiros de Núcleo/Projeto: admin, coord_geral, financeiro (visão 360°)
-// e o coord_nucleo do respectivo escopo. Articulador NUNCA tem acesso financeiro (isGlobalUser
-// não o inclui e ele nunca possui escopo coord_nucleo) — bloqueado por definição.
+// Acesso aos painéis financeiros de Núcleo/Projeto: admin, financeiro (visão 360°)
+// e o coord_nucleo do respectivo escopo. Coord_geral e Articulador NUNCA têm acesso
+// financeiro (hasFinanceiroFullAccess não inclui coord_geral, e nenhum dos dois possui
+// escopo coord_nucleo) — bloqueados por definição.
 async function userCanAccessNucleo(user: any, nucleoId: number): Promise<boolean> {
   if (hasFinanceiroFullAccess(user)) return true
   return getScopedNucleoIds(user).includes(nucleoId)
@@ -54,7 +55,7 @@ async function uploadComprovanteFile(
 // lançado no Geral tenha lastro rastreável no arquivo oficial da NFP (CNPJ,
 // nota fiscal, data), em vez de ser digitado manualmente sem comprovação.
 //
-// Além disso, admin/coord_geral podem registrar lançamentos MANUAIS pontuais
+// Além disso, admin/financeiro podem registrar lançamentos MANUAIS pontuais
 // (/geral/lancamentos-manuais) para ajustes que não vêm da planilha — ex.:
 // estorno, taxa bancária, correção de valor, doação direta etc. Esses
 // lançamentos usam tipos próprios (entrada_manual/saida_manual), exigem
@@ -62,12 +63,13 @@ async function uploadComprovanteFile(
 // audit_log, mas NUNCA se confundem com entrada_nfp (que só é criada pela
 // importação da planilha).
 
-// Importação da planilha de créditos NFP (admin, coord_geral) — cada linha
+// Importação da planilha de créditos NFP (admin, financeiro) — cada linha
 // elegível (Créditos > 0 e Situação != "A Calcular") vira um lançamento de
 // entrada no Painel Geral. Deduplicação pelo hash de todos os campos da
 // linha, para permitir reimportar o mesmo arquivo atualizado mês a mês
-// sem duplicar lançamentos já processados.
-financeiro.post('/geral/importar-nfp', requireRole('admin', 'coord_geral'), async (c) => {
+// sem duplicar lançamentos já processados. Coord_geral NÃO participa (sem
+// acesso ao financeiro); o Financeiro é quem sobe a planilha de arrecadação.
+financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
 
   const formData = await c.req.formData().catch(() => null)
@@ -242,8 +244,8 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'coord_geral'), asyn
 // vêm da planilha NFP (ex.: estorno, taxa bancária, correção de valor). Fica
 // SEPARADO da importação automática (tipo 'entrada_nfp'), sempre com
 // finalidade obrigatória e registro em audit_log, para manter rastreabilidade
-// mesmo sendo um lançamento digitado manualmente.
-financeiro.post('/geral/lancamentos-manuais', requireRole('admin', 'coord_geral'), async (c) => {
+// mesmo sendo um lançamento digitado manualmente. admin/financeiro apenas.
+financeiro.post('/geral/lancamentos-manuais', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const body = await c.req.json<{ direcao?: 'entrada' | 'saida'; valor?: number; finalidade?: string }>().catch(() => ({} as any))
   const { direcao, valor, finalidade } = body
@@ -288,7 +290,7 @@ financeiro.post('/geral/lancamentos-manuais', requireRole('admin', 'coord_geral'
 
 // Edita um lançamento manual existente (somente entrada_manual/saida_manual,
 // nunca entrada_nfp nem repasses — esses têm seu próprio ciclo de vida/lastro).
-financeiro.put('/geral/lancamentos-manuais/:id', requireRole('admin', 'coord_geral'), async (c) => {
+financeiro.put('/geral/lancamentos-manuais/:id', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
   const body = await c.req.json<{ valor?: number; finalidade?: string }>().catch(() => ({} as any))
@@ -361,8 +363,8 @@ financeiro.delete('/geral/lancamentos-manuais/:id', requireRole('admin'), async 
   return okResponse(c, { id, status: 'cancelado' })
 })
 
-// Histórico de importações realizadas (admin, coord_geral, financeiro)
-financeiro.get('/geral/importacoes', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
+// Histórico de importações realizadas (admin, financeiro)
+financeiro.get('/geral/importacoes', requireRole('admin', 'financeiro'), async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT i.*, u.nome AS importado_por_nome
      FROM financeiro_importacoes_nfp i
@@ -374,7 +376,7 @@ financeiro.get('/geral/importacoes', requireRole('admin', 'coord_geral', 'financ
 
 // Baixa o arquivo original (CSV) de uma importação NFP — para conferência/auditoria,
 // sem precisar listar as milhares de linhas individuais na tela.
-financeiro.get('/geral/importacoes/:id/arquivo', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
+financeiro.get('/geral/importacoes/:id/arquivo', requireRole('admin', 'financeiro'), async (c) => {
   const id = Number(c.req.param('id'))
   const importacao = await c.env.DB.prepare('SELECT nome_arquivo, arquivo_original_key FROM financeiro_importacoes_nfp WHERE id = ?')
     .bind(id)
@@ -396,12 +398,12 @@ financeiro.get('/geral/importacoes/:id/arquivo', requireRole('admin', 'coord_ger
   })
 })
 
-financeiro.get('/geral/saldo', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
+financeiro.get('/geral/saldo', requireRole('admin', 'financeiro'), async (c) => {
   const row = await c.env.DB.prepare('SELECT saldo FROM saldo_geral').first<{ saldo: number }>()
   return okResponse(c, { saldo: row?.saldo ?? 0 })
 })
 
-financeiro.get('/geral/lancamentos', requireRole('admin', 'coord_geral'), async (c) => {
+financeiro.get('/geral/lancamentos', requireRole('admin', 'financeiro'), async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT * FROM financeiro_lancamentos WHERE nivel = 'geral' ORDER BY created_at DESC`
   ).all()
@@ -412,7 +414,7 @@ financeiro.get('/geral/lancamentos', requireRole('admin', 'coord_geral'), async 
 // emitente, número da NF ou id do lançamento. Usado pela tela de Financeiro Geral
 // em vez de listar todos os registros de uma vez (que pode somar milhares de linhas
 // vindas da importação da NFP).
-financeiro.get('/geral/buscar', requireRole('admin', 'coord_geral', 'financeiro'), async (c) => {
+financeiro.get('/geral/buscar', requireRole('admin', 'financeiro'), async (c) => {
   const termo = (c.req.query('q') || '').trim()
   if (!termo || termo.length < 2) {
     return errorResponse(c, 422, 'Informe ao menos 2 caracteres para buscar.')
@@ -577,9 +579,15 @@ financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo
 })
 
 // ================= REPASSES: SOLICITAÇÃO / APROVAÇÃO / EXECUÇÃO =================
+//
+// Coordenador Geral NÃO tem nenhum acesso ao módulo financeiro (regra de negócio
+// explícita) — por isso nenhuma rota abaixo o inclui. Quem SOLICITA repasse do
+// Geral para um Núcleo é o próprio Coordenador de Núcleo (do seu núcleo) ou o
+// Administrador; quem APROVA/EXECUTA é o Administrador ou o papel Financeiro
+// ("recebe as solicitações de repasse e pagamento dos núcleos").
 
-// Solicitar repasse Geral -> Núcleo (admin, coord_geral)
-financeiro.post('/repasses/geral-nucleo', requireRole('admin', 'coord_geral'), async (c) => {
+// Solicitar repasse Geral -> Núcleo (admin, financeiro, ou o próprio coord_nucleo do núcleo)
+financeiro.post('/repasses/geral-nucleo', requireRole('admin', 'coord_nucleo', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const body = await c.req.json<{ nucleo_id?: number; valor?: number; finalidade?: string }>().catch(() => ({} as any))
   const { nucleo_id, valor, finalidade } = body
@@ -588,6 +596,10 @@ financeiro.post('/repasses/geral-nucleo', requireRole('admin', 'coord_geral'), a
 
   const nucleo = await c.env.DB.prepare('SELECT id FROM nucleos WHERE id = ?').bind(nucleo_id).first()
   if (!nucleo) return errorResponse(c, 404, 'Núcleo não encontrado.')
+
+  if (!(await userCanAccessNucleo(actor, nucleo_id))) {
+    return errorResponse(c, 403, 'Você só pode solicitar repasse para o seu próprio núcleo.')
+  }
 
   const saldoGeral = await c.env.DB.prepare('SELECT saldo FROM saldo_geral').first<{ saldo: number }>()
   if ((saldoGeral?.saldo ?? 0) < valor) {
@@ -607,8 +619,8 @@ financeiro.post('/repasses/geral-nucleo', requireRole('admin', 'coord_geral'), a
   return okResponse(c, { id, status: 'pendente' }, 201)
 })
 
-// Solicitar repasse Núcleo -> Projeto (coord_nucleo do respectivo núcleo, coord_geral, admin)
-financeiro.post('/repasses/nucleo-projeto', requireRole('admin', 'coord_geral', 'coord_nucleo'), async (c) => {
+// Solicitar repasse Núcleo -> Projeto (coord_nucleo do respectivo núcleo, admin, financeiro)
+financeiro.post('/repasses/nucleo-projeto', requireRole('admin', 'coord_nucleo', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const body = await c.req.json<{ projeto_id?: number; valor?: number; finalidade?: string }>().catch(() => ({} as any))
   const { projeto_id, valor, finalidade } = body
@@ -643,10 +655,10 @@ financeiro.post('/repasses/nucleo-projeto', requireRole('admin', 'coord_geral', 
   return okResponse(c, { id, status: 'pendente' }, 201)
 })
 
-// Aprovar repasse:
-// - Geral -> Núcleo: SOMENTE o Administrador pode autorizar (Coord. Geral apenas solicita).
-// - Núcleo -> Projeto: Admin ou Coord. Geral podem autorizar.
-financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'coord_geral'), async (c) => {
+// Aprovar repasse (admin, financeiro) — o Financeiro é quem recebe e processa
+// as solicitações de repasse/pagamento dos núcleos, tanto Geral->Núcleo quanto
+// Núcleo->Projeto.
+financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
 
@@ -654,9 +666,6 @@ financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'coord_geral'), as
   if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
   if (!['repasse_geral_nucleo', 'repasse_nucleo_projeto'].includes(lancamento.tipo)) {
     return errorResponse(c, 400, 'Este lançamento não é um repasse aprovável.')
-  }
-  if (lancamento.tipo === 'repasse_geral_nucleo' && !isAdmin(actor)) {
-    return errorResponse(c, 403, 'Apenas o Administrador pode autorizar repasses do Painel Geral para um Núcleo.')
   }
   if (lancamento.status !== 'pendente') {
     return errorResponse(c, 409, `Lançamento já está com status "${lancamento.status}".`)
@@ -670,11 +679,11 @@ financeiro.post('/repasses/:id/aprovar', requireRole('admin', 'coord_geral'), as
 
   await logAudit(c, { userId: actor.sub, acao: 'financeiro.repasse.aprovar', entidade: 'financeiro_lancamentos', entidadeId: id })
 
-  return okResponse(c, { message: 'Repasse aprovado. Aguardando execução pelo administrador.' })
+  return okResponse(c, { message: 'Repasse aprovado. Aguardando execução.' })
 })
 
-// Rejeitar repasse (admin, coord_geral)
-financeiro.post('/repasses/:id/rejeitar', requireRole('admin', 'coord_geral'), async (c) => {
+// Rejeitar repasse (admin, financeiro)
+financeiro.post('/repasses/:id/rejeitar', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
   const body = await c.req.json<{ motivo?: string }>().catch(() => ({} as any))
@@ -746,7 +755,7 @@ financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), as
 // ================= FATURAS =================
 
 // Exibe a fatura como HTML simples, pronto para impressão/PDF pelo navegador
-// (Ctrl+P / Salvar como PDF). Acesso: admin, coord_geral, financeiro (visão 360°)
+// (Ctrl+P / Salvar como PDF). Acesso: admin, financeiro (visão 360°)
 // ou o coordenador do núcleo destinatário do repasse.
 financeiro.get('/faturas/:id', async (c) => {
   const actor = c.get('user')

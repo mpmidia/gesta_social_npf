@@ -76,8 +76,10 @@ comunicacao.post('/campanhas', requireRole(...ROLES_COMUNICACAO), async (c) => {
       return errorResponse(c, 403, 'Você só pode criar campanhas para projetos de núcleos aos quais tem acesso.')
     }
   }
-  if (!isGlobalUser(actor) && segmento_tipo === 'todos') {
-    return errorResponse(c, 403, 'Apenas administradores/coordenador geral podem segmentar "todos".')
+  // "Todos os colaboradores": admin, coord_geral e articulador podem segmentar
+  // (o Articulador precisa articular tanto por núcleo quanto com todos de uma vez).
+  if (!isGlobalUser(actor) && !isArticulador(actor) && segmento_tipo === 'todos') {
+    return errorResponse(c, 403, 'Apenas administradores, coordenador geral ou articulador podem segmentar "todos".')
   }
 
   const result = await c.env.DB.prepare(

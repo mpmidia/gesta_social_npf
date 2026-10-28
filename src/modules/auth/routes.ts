@@ -85,8 +85,10 @@ auth.get('/me', authMiddleware, async (c) => {
   return okResponse(c, user)
 })
 
-// ===== LISTAR USUÁRIOS (admin, coord_geral) =====
-auth.get('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), async (c) => {
+// ===== LISTAR USUÁRIOS (somente admin) =====
+// Usuários & Permissões é uma tela EXCLUSIVA do Administrador — nenhum outro
+// papel enxerga ou gerencia outros usuários (nem Coordenador Geral).
+auth.get('/usuarios', authMiddleware, requireRole('admin'), async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT u.id, u.nome, u.email, u.ativo, u.created_at
      FROM users u WHERE u.excluido_em IS NULL ORDER BY u.created_at DESC`
@@ -102,8 +104,11 @@ auth.get('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), async
   return okResponse(c, usersWithRoles)
 })
 
-// ===== CRIAR USUÁRIO COM PAPEL (admin cria qualquer papel; coord_geral cria coord_nucleo/articulador) =====
-auth.post('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), async (c) => {
+// ===== CRIAR USUÁRIO COM PAPEL (somente admin) =====
+// Cada usuário possui exatamente UM papel (user_roles.user_id tem UNIQUE KEY —
+// ver migration 0007). Não existe mais o conceito de "múltiplos papéis" por
+// usuário: trocar de papel sempre substitui o anterior (ver PUT abaixo).
+auth.post('/usuarios', authMiddleware, requireRole('admin'), async (c) => {
   const actor = c.get('user')
   const body = await c.req.json<{
     nome?: string
@@ -122,14 +127,6 @@ auth.post('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), asyn
   const validRoles: Role[] = ['admin', 'coord_geral', 'coord_nucleo', 'articulador', 'financeiro']
   if (!validRoles.includes(role)) {
     return errorResponse(c, 422, 'Papel inválido.')
-  }
-
-  // Regra crítica: apenas admin pode criar outro admin, coord_geral ou financeiro
-  // (o papel financeiro tem visão 360° de todas as operações financeiras, por isso
-  // é tratado com o mesmo nível de restrição de admin/coord_geral).
-  const actorIsAdmin = isAdmin(actor)
-  if ((role === 'admin' || role === 'coord_geral' || role === 'financeiro') && !actorIsAdmin) {
-    return errorResponse(c, 403, 'Apenas administradores podem criar admin, coordenador geral ou financeiro.')
   }
 
   if (role === 'coord_nucleo' && !nucleo_id) {
@@ -171,6 +168,9 @@ auth.post('/usuarios', authMiddleware, requireRole('admin', 'coord_geral'), asyn
 })
 
 // ===== PROMOVER USUÁRIO A ADMIN (somente admin) =====
+// Como cada usuário tem exatamente UM papel (user_roles.user_id é UNIQUE),
+// promover a admin SUBSTITUI o papel atual do usuário pelo papel 'admin'
+// (não soma um papel extra — não existe mais "acumular papéis").
 auth.post('/usuarios/:id/promover-admin', authMiddleware, requireRole('admin'), async (c) => {
   const actor = c.get('user')
   const targetId = Number(c.req.param('id'))
@@ -183,16 +183,12 @@ auth.post('/usuarios/:id/promover-admin', authMiddleware, requireRole('admin'), 
     return errorResponse(c, 404, 'Usuário não encontrado.')
   }
 
-  const alreadyAdmin = await c.env.DB.prepare(
-    "SELECT id FROM user_roles WHERE user_id = ? AND role = 'admin'"
-  )
-    .bind(targetId)
-    .first()
-
-  if (alreadyAdmin) {
+  const targetRoles = await loadUserRoles(c.env.DB, targetId)
+  if (targetRoles.some((r) => r.role === 'admin')) {
     return errorResponse(c, 409, 'Usuário já é administrador.')
   }
 
+  await c.env.DB.prepare('DELETE FROM user_roles WHERE user_id = ?').bind(targetId).run()
   await c.env.DB.prepare(
     "INSERT INTO user_roles (user_id, role, escopo_tipo, escopo_id) VALUES (?, 'admin', NULL, NULL)"
   )
@@ -204,7 +200,7 @@ auth.post('/usuarios/:id/promover-admin', authMiddleware, requireRole('admin'), 
     acao: 'auth.usuario.promover_admin',
     entidade: 'users',
     entidadeId: targetId,
-    payload: { promovido: target.nome, por: actor.nome }
+    payload: { promovido: target.nome, por: actor.nome, papelAnterior: targetRoles[0]?.role ?? null }
   })
 
   return okResponse(c, { message: `${target.nome} agora é administrador.` })
@@ -248,11 +244,13 @@ auth.post('/usuarios/:id/reativar', authMiddleware, requireRole('admin'), async 
   return okResponse(c, { message: `${target.nome} reativado.` })
 })
 
-// ===== EDITAR USUÁRIO (admin edita qualquer um; coord_geral edita coord_nucleo/articulador) =====
-// Permite alterar nome, e-mail e o papel/escopo (núcleo) do usuário. A troca de
-// senha tem rota própria (/usuarios/:id/resetar-senha), para manter uma ação
-// sensível isolada e sempre auditada separadamente.
-auth.put('/usuarios/:id', authMiddleware, requireRole('admin', 'coord_geral'), async (c) => {
+// ===== EDITAR USUÁRIO (somente admin) =====
+// Permite alterar nome, e-mail e o papel/escopo (núcleo) do usuário. Cada
+// usuário tem exatamente UM papel — atribuir um novo papel sempre SUBSTITUI
+// o anterior (nunca acumula). A troca de senha tem rota própria
+// (/usuarios/:id/resetar-senha), para manter uma ação sensível isolada e
+// sempre auditada separadamente.
+auth.put('/usuarios/:id', authMiddleware, requireRole('admin'), async (c) => {
   const actor = c.get('user')
   const targetId = Number(c.req.param('id'))
   const body = await c.req.json<{
@@ -268,17 +266,6 @@ auth.put('/usuarios/:id', authMiddleware, requireRole('admin', 'coord_geral'), a
     .bind(targetId)
     .first<{ id: number; nome: string }>()
   if (!target) return errorResponse(c, 404, 'Usuário não encontrado.')
-
-  const targetRoles = await loadUserRoles(c.env.DB, targetId)
-  const targetIsAdminOrCoordGeral = targetRoles.some((r) => r.role === 'admin' || r.role === 'coord_geral')
-  const actorIsAdmin = isAdmin(actor)
-
-  // coord_geral não pode editar admin/coord_geral (inclusive a si mesmo via esta rota
-  // — ele não altera o próprio papel por aqui, só um admin pode reatribuir papéis de
-  // admin/coord_geral).
-  if (!actorIsAdmin && targetIsAdminOrCoordGeral) {
-    return errorResponse(c, 403, 'Apenas administradores podem editar administradores ou coordenadores gerais.')
-  }
 
   if (nome !== undefined && !nome.trim()) {
     return errorResponse(c, 422, 'Nome não pode ser vazio.')
@@ -301,18 +288,14 @@ auth.put('/usuarios/:id', authMiddleware, requireRole('admin', 'coord_geral'), a
   if (role !== undefined) {
     const validRoles: Role[] = ['admin', 'coord_geral', 'coord_nucleo', 'articulador', 'financeiro']
     if (!validRoles.includes(role)) return errorResponse(c, 422, 'Papel inválido.')
-    if ((role === 'admin' || role === 'coord_geral' || role === 'financeiro') && !actorIsAdmin) {
-      return errorResponse(c, 403, 'Apenas administradores podem atribuir o papel admin, coordenador geral ou financeiro.')
-    }
     if (role === 'coord_nucleo' && !nucleo_id) {
       return errorResponse(c, 422, 'Para o papel coord_nucleo é obrigatório informar nucleo_id.')
     }
-    if (targetId === actor.sub && role !== 'admin' && isAdmin(actor)) {
+    if (targetId === actor.sub && role !== 'admin') {
       return errorResponse(c, 400, 'Você não pode remover seu próprio papel de administrador.')
     }
 
-    // Substitui todos os papéis do usuário por este único papel (o formulário de
-    // edição trabalha com um papel principal por usuário, igual à criação).
+    // Substitui o único papel do usuário pelo novo (user_roles.user_id é UNIQUE).
     await c.env.DB.prepare('DELETE FROM user_roles WHERE user_id = ?').bind(targetId).run()
     await c.env.DB.prepare(
       'INSERT INTO user_roles (user_id, role, escopo_tipo, escopo_id) VALUES (?, ?, ?, ?)'

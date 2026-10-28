@@ -32,10 +32,12 @@ function isArticulador() {
 function isFinanceiro() {
   return hasRole('financeiro');
 }
-// Visão 360° do financeiro: admin, coord_geral e o papel dedicado "financeiro"
+// Visão 360° do financeiro: SOMENTE admin e o papel dedicado "financeiro"
 // enxergam todos os saldos/lançamentos/comprovantes, independente de escopo.
+// Coordenador Geral NÃO tem nenhum acesso ao módulo financeiro (regra de negócio
+// explícita) — por isso NÃO usa isGlobal() aqui.
 function hasFinanceiroFullAccess() {
-  return isGlobal() || isFinanceiro();
+  return isAdmin() || isFinanceiro();
 }
 function scopedNucleoIds() {
   return (CURRENT_USER?.roles || []).filter(r => r.role === 'coord_nucleo').map(r => r.escopo_id);
@@ -102,10 +104,11 @@ function buildNav() {
     items.push({ href: '#/colaboradores', icon: 'fa-address-card', label: 'Colaboradores' });
   }
 
-  // Financeiro: Admin, Coordenador Geral e o papel dedicado Financeiro têm o Painel
-  // Geral + Repasses (aprovação/execução) — visão 360° de todas as operações.
-  // Articulador NUNCA vê nada de financeiro (apenas leitura institucional em Núcleos/Projetos + Comunicação).
-  if (isGlobal() || isFinanceiro()) {
+  // Financeiro: SOMENTE Admin e o papel dedicado Financeiro têm o Painel Geral +
+  // Repasses (aprovação/execução) — visão 360° de todas as operações. Coordenador
+  // Geral NÃO tem nenhum acesso ao financeiro (regra de negócio explícita).
+  // Articulador também nunca vê financeiro (apenas leitura institucional + Comunicação).
+  if (isAdmin() || isFinanceiro()) {
     items.push({ href: '#/financeiro-geral', icon: 'fa-sack-dollar', label: 'Financeiro Geral' });
     items.push({ href: '#/repasses', icon: 'fa-money-bill-transfer', label: 'Repasses' });
   }
@@ -304,6 +307,12 @@ async function renderNucleoDetalhe(id) {
   } catch { saldoHtml = '<p class="text-gray-400 text-sm">Sem acesso ao saldo</p>'; }
 
   const canManage = isGlobal() || scopedNucleoIds().includes(Number(id));
+  // Gestão de coordenadores do núcleo: Admin e Coordenador Geral (não o próprio
+  // coord_nucleo, que não pode se auto-gerenciar).
+  const canManageCoordenadores = isGlobal();
+  // Solicitar repasse do Geral para este núcleo: Admin, Financeiro (visão 360°) ou
+  // o Coordenador do próprio núcleo. Coordenador Geral NÃO vê nada de financeiro.
+  const canRequestRepasseNucleo = isAdmin() || isFinanceiro() || scopedNucleoIds().includes(Number(id));
 
   document.getElementById('page-content').innerHTML = `
     <a href="#/nucleos" class="text-sm text-brand-600 hover:underline font-medium mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i> Voltar</a>
@@ -315,10 +324,10 @@ async function renderNucleoDetalhe(id) {
             <p class="text-gray-500 text-sm mb-3">${n.descricao || ''}</p>
             <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/n/${n.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/n/${n.slug_publico}</a></p>
           </div>
-          ${isGlobal() && !n.arquivado_em ? `
+          ${canManage && !n.arquivado_em ? `
           <div class="flex gap-2 shrink-0">
             <button onclick="openEditNucleoModal(${id})" class="text-xs text-gray-600 hover:text-brand-600 border border-gray-300 rounded-lg px-3 py-1.5"><i class="fas fa-pen mr-1"></i>Editar</button>
-            <button onclick="excluirOuArquivarNucleo(${id})" class="text-xs text-red-600 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5"><i class="fas fa-trash mr-1"></i>Excluir/Arquivar</button>
+            ${isGlobal() ? `<button onclick="excluirOuArquivarNucleo(${id})" class="text-xs text-red-600 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5"><i class="fas fa-trash mr-1"></i>Excluir/Arquivar</button>` : ''}
           </div>` : ''}
         </div>
       </div>
@@ -335,14 +344,14 @@ async function renderNucleoDetalhe(id) {
           ${(n.coordenadores || []).map(cd => `
             <li class="flex items-center justify-between gap-2">
               <span><i class="fas fa-user mr-1 text-gray-400"></i> ${cd.nome} (${cd.email})</span>
-              ${isGlobal() ? `
+              ${canManageCoordenadores ? `
                 <span class="shrink-0 space-x-2">
                   <button onclick="openAddCoordenadorModal(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-amber-600 hover:underline"><i class="fas fa-retweet mr-0.5"></i>Substituir</button>
                   <button onclick="removerCoordenador(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-red-500 hover:underline"><i class="fas fa-times mr-0.5"></i>Remover</button>
                 </span>` : ''}
             </li>`).join('') || '<li class="text-gray-400">Nenhum coordenador vinculado.</li>'}
         </ul>
-        ${isGlobal() ? `<button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Vincular coordenador</button>` : ''}
+        ${canManageCoordenadores ? `<button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Cadastrar coordenador</button>` : ''}
       </div>
       <div class="gs-card p-5">
         <h3 class="font-semibold text-gray-700 mb-3">Projetos</h3>
@@ -353,9 +362,9 @@ async function renderNucleoDetalhe(id) {
       </div>
     </div>
 
-    ${isGlobal() ? `
+    ${canRequestRepasseNucleo ? `
     <div class="gs-card p-5">
-      <h3 class="font-semibold text-gray-700 mb-3">Repassar recurso do Geral para este Núcleo</h3>
+      <h3 class="font-semibold text-gray-700 mb-3">Solicitar repasse do Geral para este Núcleo</h3>
       <form id="form-repasse-nucleo" class="flex flex-wrap gap-3 items-end">
         <input type="hidden" name="nucleo_id" value="${id}" />
         <div>
@@ -370,12 +379,13 @@ async function renderNucleoDetalhe(id) {
       </form>
     </div>` : ''}
 
+    ${hasFinanceiroFullAccess() ? `
     <div class="gs-card p-5 mt-6">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Financeiro do Núcleo</h3>
       <div id="nucleo-lancamentos">Carregando...</div>
-    </div>`;
+    </div>` : ''}`;
 
-  if (isGlobal()) {
+  if (canRequestRepasseNucleo) {
     document.getElementById('form-repasse-nucleo').addEventListener('submit', async (e) => {
       e.preventDefault();
       const body = Object.fromEntries(new FormData(e.target).entries());
@@ -451,40 +461,84 @@ async function removerCoordenador(nucleoId, userId, nome) {
   } catch (err) { toast(apiErr(err), 'error'); }
 }
 
+// Cadastro de Coordenador de Núcleo diretamente pelo painel do núcleo — o
+// Coordenador Geral NÃO tem mais acesso à tela global de Usuários & Permissões
+// (exclusiva do Administrador), então este modal nunca consulta /api/auth/usuarios.
+// Dois modos: "novo" (cria usuário do zero) ou "existente" (reaproveita um
+// usuário já cadastrado pelo e-mail, reatribuindo o papel dele).
 function openAddCoordenadorModal(nucleoId, substituirUserId, substituirNome) {
-  const titulo = substituirUserId ? `Substituir Coordenador (${substituirNome})` : 'Vincular Coordenador de Núcleo';
-  axios.get('/api/auth/usuarios').then(({ data }) => {
-    const candidatos = data.data.filter(u => u.ativo && u.roles.some(r => r.role === 'coord_nucleo'));
-    openModal(`
-      <h3 class="text-lg font-bold text-gray-800 mb-4">${titulo}</h3>
-      <p class="text-sm text-gray-500 mb-3">Selecione um usuário já cadastrado com papel "Coordenador de Núcleo" (crie o usuário em Usuários &amp; Permissões antes, se necessário).</p>
-      <form id="form-add-coord" class="space-y-3">
-        <select name="user_id" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
-          <option value="">Selecione...</option>
-          ${candidatos.map(u => `<option value="${u.id}">${u.nome} (${u.email})</option>`).join('')}
-        </select>
-        ${!candidatos.length ? '<p class="text-xs text-amber-600">Nenhum usuário com papel "Coordenador de Núcleo" disponível. Crie um em Usuários &amp; Permissões.</p>' : ''}
-        <div class="flex justify-end gap-2 pt-2">
-          <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-          <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">${substituirUserId ? 'Substituir' : 'Vincular'}</button>
+  const titulo = substituirUserId ? `Substituir Coordenador (${substituirNome})` : 'Cadastrar Coordenador de Núcleo';
+  openModal(`
+    <h3 class="text-lg font-bold text-gray-800 mb-4">${titulo}</h3>
+    <div class="flex gap-2 mb-4 border-b border-gray-200">
+      <button type="button" id="tab-novo" class="px-3 py-2 text-sm font-medium border-b-2 border-brand-600 text-brand-600">Novo usuário</button>
+      <button type="button" id="tab-existente" class="px-3 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500">Usuário existente</button>
+    </div>
+    <form id="form-add-coord" class="space-y-3">
+      <input type="hidden" name="modo" id="coord-modo" value="novo" />
+      <div id="campos-novo" class="space-y-3">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Nome</label>
+          <input name="nome" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
         </div>
-      </form>`);
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">E-mail</label>
+          <input name="email" type="email" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Senha</label>
+          <input name="senha" type="password" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        </div>
+      </div>
+      <div id="campos-existente" class="space-y-3 hidden">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">E-mail do usuário já cadastrado</label>
+          <input name="email_existente" type="email" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" placeholder="usuario@email.com" />
+          <p class="text-xs text-gray-400 mt-1">O papel atual deste usuário será substituído por "Coordenador de Núcleo" deste núcleo.</p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">${substituirUserId ? 'Substituir' : 'Cadastrar'}</button>
+      </div>
+    </form>`);
 
-    document.getElementById('form-add-coord').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const body = Object.fromEntries(new FormData(e.target).entries());
-      body.user_id = parseInt(body.user_id);
-      if (!body.user_id) { toast('Selecione um usuário.', 'error'); return; }
-      try {
-        if (substituirUserId) {
-          await axios.delete(`/api/nucleos/${nucleoId}/coordenadores/${substituirUserId}`);
-        }
-        await axios.post(`/api/nucleos/${nucleoId}/coordenadores`, body);
-        closeModal();
-        toast(substituirUserId ? 'Coordenador substituído.' : 'Coordenador vinculado.');
-        renderNucleoDetalhe(nucleoId);
-      } catch (err) { toast(apiErr(err), 'error'); }
-    });
+  const tabNovo = document.getElementById('tab-novo');
+  const tabExistente = document.getElementById('tab-existente');
+  const camposNovo = document.getElementById('campos-novo');
+  const camposExistente = document.getElementById('campos-existente');
+  const modoInput = document.getElementById('coord-modo');
+
+  function setModo(modo) {
+    modoInput.value = modo;
+    const ehNovo = modo === 'novo';
+    camposNovo.classList.toggle('hidden', !ehNovo);
+    camposExistente.classList.toggle('hidden', ehNovo);
+    tabNovo.classList.toggle('border-brand-600', ehNovo);
+    tabNovo.classList.toggle('text-brand-600', ehNovo);
+    tabNovo.classList.toggle('border-transparent', !ehNovo);
+    tabNovo.classList.toggle('text-gray-500', !ehNovo);
+    tabExistente.classList.toggle('border-brand-600', !ehNovo);
+    tabExistente.classList.toggle('text-brand-600', !ehNovo);
+    tabExistente.classList.toggle('border-transparent', ehNovo);
+    tabExistente.classList.toggle('text-gray-500', ehNovo);
+  }
+  tabNovo.addEventListener('click', () => setModo('novo'));
+  tabExistente.addEventListener('click', () => setModo('existente'));
+
+  document.getElementById('form-add-coord').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const modo = fd.get('modo');
+    const body = modo === 'existente'
+      ? { modo: 'existente', email: fd.get('email_existente') }
+      : { modo: 'novo', nome: fd.get('nome'), email: fd.get('email'), senha: fd.get('senha') };
+    try {
+      await axios.post(`/api/nucleos/${nucleoId}/coordenadores`, body);
+      closeModal();
+      toast(substituirUserId ? 'Coordenador substituído.' : 'Coordenador cadastrado.');
+      renderNucleoDetalhe(nucleoId);
+    } catch (err) { toast(apiErr(err), 'error'); }
   });
 }
 
@@ -595,8 +649,12 @@ async function renderProjetoDetalhe(id) {
     saldoHtml = `<p class="text-2xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>`;
   } catch { saldoHtml = '<p class="text-gray-400 text-sm">Sem acesso ao saldo</p>'; }
 
-  const canRequestRepasse = isGlobal() || scopedNucleoIds().includes(p.nucleo_id);
+  // Solicitar repasse do Núcleo para este Projeto: Admin, Financeiro (visão 360°)
+  // ou o Coordenador do núcleo dono do projeto. Coordenador Geral NÃO vê financeiro.
+  const canRequestRepasse = isAdmin() || isFinanceiro() || scopedNucleoIds().includes(p.nucleo_id);
 
+  // Editar/gerir o projeto em si (não financeiro): Admin e Coordenador Geral têm
+  // gestão plena de núcleos/projetos; Coordenador de Núcleo gerencia o seu.
   const canEditProjeto = isGlobal() || scopedNucleoIds().includes(p.nucleo_id);
 
   document.getElementById('page-content').innerHTML = `
@@ -857,7 +915,9 @@ async function renderFinanceiroGeral() {
     axios.get('/api/financeiro/geral/importacoes')
   ]);
   const importacoes = importacoesData.data;
-  const podeGerir = isGlobal(); // financeiro tem visão 360° mas não lança manual/importa
+  // Admin e Financeiro podem lançar manual/importar a planilha da NFP. Coordenador
+  // Geral NÃO tem nenhum acesso ao financeiro (não deveria nem chegar nesta tela).
+  const podeGerir = isAdmin() || isFinanceiro();
 
   document.getElementById('page-content').innerHTML = `
     <div class="gs-card p-5 mb-6 flex items-center justify-between flex-wrap gap-4">
@@ -1096,12 +1156,11 @@ async function renderRepasses() {
       .forEach(l => pendentes.push({ ...l, contexto: `Projeto: ${p.nome}` }));
   }
 
-  // Regra de aprovação:
-  // - repasse_geral_nucleo: SOMENTE o Administrador pode aprovar (Coord. Geral apenas solicitou).
-  // - repasse_nucleo_projeto: Admin ou Coordenador Geral podem aprovar.
+  // Regra de aprovação: Admin ou Financeiro aprovam qualquer tipo de repasse
+  // (geral→núcleo ou núcleo→projeto). Coordenador Geral NÃO tem acesso ao
+  // financeiro, portanto nunca aprova.
   function podeAprovar(l) {
-    if (l.tipo === 'repasse_geral_nucleo') return isAdmin();
-    return isGlobal();
+    return isAdmin() || isFinanceiro();
   }
   const podeExecutar = isAdmin() || isFinanceiro();
   const tipoLabel = { repasse_geral_nucleo: 'Geral → Núcleo', repasse_nucleo_projeto: 'Núcleo → Projeto' };

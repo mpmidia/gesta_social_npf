@@ -74,19 +74,22 @@ export function isFinanceiro(user: AppEnv['Variables']['user']): boolean {
  * e financeiro enxergam tudo. coord_nucleo enxerga apenas os núcleos/projetos do seu escopo.
  * Usado para listagens onde o Articulador precisa visualizar núcleos/projetos
  * (para organizar campanhas/comunicação) e o Financeiro precisa ver todos os núcleos/
- * projetos para ter visão 360° do financeiro, mas nenhum dos dois tem CRUD sobre eles.
+ * projetos para gerir repasses de qualquer núcleo, mas nenhum dos dois tem CRUD sobre eles.
  */
 export function hasBroadReadAccess(user: AppEnv['Variables']['user']): boolean {
   return isGlobalUser(user) || isArticulador(user) || isFinanceiro(user)
 }
 
 /**
- * Visão 360° do Financeiro: admin, coord_geral e o papel dedicado "financeiro"
- * enxergam TODOS os saldos/lançamentos/comprovantes de todos os níveis (Geral/
- * Núcleo/Projeto), independente de escopo. O papel "financeiro" é somente para
- * operações financeiras — não tem CRUD de núcleo/projeto/usuários nem acesso a
- * comunicação.
+ * Visão 360° do Financeiro: SOMENTE admin e o papel dedicado "financeiro" enxergam
+ * e operam todos os saldos/lançamentos/comprovantes de todos os níveis (Geral/Núcleo/
+ * Projeto), independente de escopo.
+ *
+ * IMPORTANTE: Coordenador Geral NÃO tem nenhum acesso ao módulo financeiro (regra de
+ * negócio explícita) — por isso esta função usa isAdmin() em vez de isGlobalUser()
+ * (que incluiria coord_geral). O papel "financeiro" é o único, além do admin, que
+ * recebe e processa solicitações de repasse/pagamento dos núcleos.
  */
 export function hasFinanceiroFullAccess(user: AppEnv['Variables']['user']): boolean {
-  return isGlobalUser(user) || isFinanceiro(user)
+  return isAdmin(user) || isFinanceiro(user)
 }
