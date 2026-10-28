@@ -188,54 +188,215 @@ window.addEventListener('hashchange', router);
 // VISÃO GERAL
 // ============================================================
 
-async function renderVisaoGeral() {
-  const content = document.getElementById('page-content');
-  let saldoGeralHtml = '';
-  let saldoMeuNucleoHtml = '';
-
-  if (isGlobal() || isFinanceiro()) {
-    const { data } = await axios.get('/api/financeiro/geral/saldo');
-    saldoGeralHtml = `
-      <div class="gs-card p-5">
-        <div class="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3"><i class="fas fa-sack-dollar"></i></div>
-        <p class="text-sm text-gray-500 mb-1">Saldo Geral (NFP)</p>
-        <p class="text-3xl font-bold text-emerald-600">${fmtMoney(data.data.saldo)}</p>
-      </div>`;
-  } else if (isCoordNucleo()) {
-    const meuNucleoId = scopedNucleoIds()[0];
-    if (meuNucleoId) {
-      try {
-        const { data } = await axios.get(`/api/financeiro/nucleo/${meuNucleoId}/saldo`);
-        saldoMeuNucleoHtml = `
-          <a href="#/nucleos/${meuNucleoId}" class="gs-card gs-card-hover p-5 block">
-            <div class="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3"><i class="fas fa-wallet"></i></div>
-            <p class="text-sm text-gray-500 mb-1">Saldo do Meu Núcleo</p>
-            <p class="text-3xl font-bold text-emerald-600">${fmtMoney(data.data.saldo)}</p>
-          </a>`;
-      } catch { /* sem acesso */ }
-    }
-  }
-
-  const { data: nucleosData } = await axios.get('/api/nucleos');
-  const { data: projetosData } = await axios.get('/api/projetos');
-
-  content.innerHTML = `
+function visaoGeralHeader() {
+  return `
     <div class="brand-gradient rounded-2xl p-6 sm:p-7 text-white mb-6 shadow-soft relative overflow-hidden">
       <div class="absolute -top-10 -right-10 w-48 h-48 rounded-full bg-white/10"></div>
       <h3 class="text-xl font-bold relative z-10">Bem-vindo(a), ${CURRENT_USER.nome.split(' ')[0]} 👋</h3>
       <p class="text-white/85 text-sm mt-1 relative z-10">${CURRENT_USER.roles.map(r => ROLE_LABELS[r.role]).join(' · ')}</p>
+    </div>`;
+}
+
+function statCard(icon, label, value, colorClass = 'bg-brand-50 text-brand-600', href) {
+  const inner = `
+    <div class="w-10 h-10 rounded-lg ${colorClass} flex items-center justify-center mb-3"><i class="fas ${icon}"></i></div>
+    <p class="text-sm text-gray-500 mb-1">${label}</p>
+    <p class="text-3xl font-bold text-gray-800">${value}</p>`;
+  return href
+    ? `<a href="${href}" class="gs-card gs-card-hover p-5 block">${inner}</a>`
+    : `<div class="gs-card p-5">${inner}</div>`;
+}
+
+// Painel por papel: cada papel vê um panorama diferente, de acordo com o seu
+// escopo de atuação (ver requisitos do RBAC redesign).
+async function renderVisaoGeral() {
+  const content = document.getElementById('page-content');
+  content.innerHTML = `${visaoGeralHeader()}<div class="text-center text-gray-400 py-10"><i class="fas fa-spinner fa-spin text-2xl"></i></div>`;
+
+  if (isAdmin()) return renderVisaoGeralAdmin(content);
+  if (isFinanceiro()) return renderVisaoGeralFinanceiro(content);
+  if (isCoordNucleo()) return renderVisaoGeralCoordNucleo(content);
+  if (isArticulador()) return renderVisaoGeralArticulador(content);
+  if (hasRole('coord_geral')) return renderVisaoGeralCoordGeral(content);
+  content.innerHTML = `${visaoGeralHeader()}<p class="text-gray-400">Nenhum painel disponível para o seu papel.</p>`;
+}
+
+// ---- ADMIN: visão completa (tudo) ----
+async function renderVisaoGeralAdmin(content) {
+  const [{ data: saldoData }, { data: nucleosData }, { data: projetosData }, { data: colabData }] = await Promise.all([
+    axios.get('/api/financeiro/geral/saldo'),
+    axios.get('/api/nucleos'),
+    axios.get('/api/projetos'),
+    axios.get('/api/colaboradores/gestao').catch(() => ({ data: { data: [] } }))
+  ]);
+
+  content.innerHTML = `
+    ${visaoGeralHeader()}
+    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      ${statCard('fa-sack-dollar', 'Saldo Geral (NFP)', fmtMoney(saldoData.data.saldo), 'bg-emerald-50 text-emerald-600', '#/financeiro-geral')}
+      ${statCard('fa-people-group', 'Núcleos ativos', nucleosData.data.length, 'bg-brand-50 text-brand-600', '#/nucleos')}
+      ${statCard('fa-diagram-project', 'Projetos ativos', projetosData.data.length, 'bg-brand-50 text-brand-600', '#/projetos')}
+      ${statCard('fa-address-card', 'Colaboradores', colabData.data.length, 'bg-amber-50 text-amber-600', '#/colaboradores')}
     </div>
-    <div class="grid sm:grid-cols-3 gap-4 mb-6">
-      ${saldoGeralHtml}${saldoMeuNucleoHtml}
-      <div class="gs-card p-5">
-        <div class="w-10 h-10 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center mb-3"><i class="fas fa-people-group"></i></div>
-        <p class="text-sm text-gray-500 mb-1">Núcleos ativos</p>
-        <p class="text-3xl font-bold text-gray-800">${nucleosData.data.length}</p>
+    <div class="gs-card p-5">
+      <h3 class="font-semibold text-gray-700 mb-3"><i class="fas fa-bolt mr-1 text-brand-500"></i>Acesso rápido</h3>
+      <div class="flex flex-wrap gap-2">
+        <a href="#/repasses" class="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"><i class="fas fa-money-bill-transfer mr-1"></i>Repasses pendentes</a>
+        <a href="#/usuarios" class="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"><i class="fas fa-users-gear mr-1"></i>Usuários & Permissões</a>
+        <a href="#/comunicacao" class="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"><i class="fas fa-bullhorn mr-1"></i>Comunicação</a>
       </div>
-      <div class="gs-card p-5">
-        <div class="w-10 h-10 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center mb-3"><i class="fas fa-diagram-project"></i></div>
-        <p class="text-sm text-gray-500 mb-1">Projetos ativos</p>
-        <p class="text-3xl font-bold text-gray-800">${projetosData.data.length}</p>
+    </div>`;
+}
+
+// ---- COORDENADOR GERAL: panorama de núcleos/projetos (ZERO financeiro) ----
+async function renderVisaoGeralCoordGeral(content) {
+  const { data: nucleosData } = await axios.get('/api/nucleos');
+  const { data: projetosData } = await axios.get('/api/projetos');
+  const nucleos = nucleosData.data;
+  const projetos = projetosData.data;
+
+  const projetosPorNucleo = (nucleoId) => projetos.filter(p => p.nucleo_id === nucleoId).length;
+
+  content.innerHTML = `
+    ${visaoGeralHeader()}
+    <div class="grid sm:grid-cols-2 gap-4 mb-6">
+      ${statCard('fa-people-group', 'Núcleos ativos', nucleos.filter(n => n.ativo).length, 'bg-brand-50 text-brand-600', '#/nucleos')}
+      ${statCard('fa-diagram-project', 'Projetos ativos', projetos.filter(p => p.ativo).length, 'bg-brand-50 text-brand-600', '#/projetos')}
+    </div>
+    <div class="gs-card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-gray-700">Panorama dos Núcleos</h3>
+        <button onclick="openCreateNucleoModal()" class="text-xs text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Novo núcleo</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr class="text-left text-gray-500 border-b">
+            <th class="py-2 pr-3">Núcleo</th><th class="py-2 pr-3">Projetos</th><th class="py-2 pr-3">Coordenadores</th><th class="py-2 pr-3">Status</th>
+          </tr></thead>
+          <tbody>
+            ${nucleos.map(n => `
+              <tr class="border-b last:border-0">
+                <td class="py-2 pr-3"><a href="#/nucleos/${n.id}" class="text-brand-600 hover:underline font-medium">${n.nome}</a></td>
+                <td class="py-2 pr-3">${projetosPorNucleo(n.id)}</td>
+                <td class="py-2 pr-3 text-gray-400">${n.ativo ? '-' : 'Inativo'}</td>
+                <td class="py-2 pr-3">${n.arquivado_em ? '<span class="text-gray-400">Arquivado</span>' : (n.ativo ? '<span class="text-emerald-600">Ativo</span>' : '<span class="text-red-500">Inativo</span>')}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="py-4 text-gray-400 text-center">Nenhum núcleo cadastrado.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+// ---- COORDENADOR DE NÚCLEO: panorama do seu núcleo + projetos ----
+async function renderVisaoGeralCoordNucleo(content) {
+  const meuNucleoId = scopedNucleoIds()[0];
+  if (!meuNucleoId) {
+    content.innerHTML = `${visaoGeralHeader()}<p class="text-gray-400">Você ainda não está vinculado a nenhum núcleo.</p>`;
+    return;
+  }
+
+  const [{ data: nucleoData }, saldoResult] = await Promise.all([
+    axios.get(`/api/nucleos/${meuNucleoId}`),
+    axios.get(`/api/financeiro/nucleo/${meuNucleoId}/saldo`).catch(() => null)
+  ]);
+  const n = nucleoData.data;
+  const projetos = n.projetos || [];
+  const saldo = saldoResult ? saldoResult.data.data.saldo : null;
+
+  content.innerHTML = `
+    ${visaoGeralHeader()}
+    <div class="grid sm:grid-cols-3 gap-4 mb-6">
+      ${saldo !== null ? statCard('fa-wallet', 'Saldo do Meu Núcleo', fmtMoney(saldo), 'bg-emerald-50 text-emerald-600', `#/nucleos/${meuNucleoId}`) : ''}
+      ${statCard('fa-diagram-project', 'Projetos do Núcleo', projetos.length, 'bg-brand-50 text-brand-600', `#/nucleos/${meuNucleoId}`)}
+      ${statCard('fa-address-card', 'Colaboradores', '', 'bg-amber-50 text-amber-600', '#/colaboradores')}
+    </div>
+    <div class="gs-card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-gray-700">Panorama de Projetos — ${n.nome}</h3>
+        <button onclick="openCreateProjetoModal(${meuNucleoId})" class="text-xs text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Novo projeto</button>
+      </div>
+      <ul class="text-sm space-y-2">
+        ${projetos.map(p => `
+          <li class="flex items-center justify-between border-b last:border-0 pb-2">
+            <a href="#/projetos/${p.id}" class="text-brand-600 hover:underline font-medium">${p.nome}</a>
+            <span class="${p.ativo ? 'text-emerald-600' : 'text-red-500'} text-xs">${p.ativo ? 'Ativo' : 'Inativo'}</span>
+          </li>`).join('') || '<li class="text-gray-400">Nenhum projeto cadastrado ainda.</li>'}
+      </ul>
+    </div>`;
+}
+
+// ---- FINANCEIRO: panorama financeiro + atalho de upload da planilha NFP ----
+async function renderVisaoGeralFinanceiro(content) {
+  const [{ data: saldoData }, { data: nucleosData }, { data: projetosData }] = await Promise.all([
+    axios.get('/api/financeiro/geral/saldo'),
+    axios.get('/api/nucleos'),
+    axios.get('/api/projetos')
+  ]);
+
+  // Agrega repasses pendentes de aprovação (geral->núcleo e núcleo->projeto).
+  let totalPendentes = 0;
+  for (const n of nucleosData.data) {
+    try {
+      const { data } = await axios.get(`/api/financeiro/nucleo/${n.id}/lancamentos`);
+      totalPendentes += data.data.filter(l => l.tipo === 'repasse_geral_nucleo' && l.status === 'pendente').length;
+    } catch { /* sem acesso, ignora */ }
+  }
+  for (const p of projetosData.data) {
+    try {
+      const { data } = await axios.get(`/api/financeiro/projeto/${p.id}/lancamentos`);
+      totalPendentes += data.data.filter(l => l.tipo === 'repasse_nucleo_projeto' && l.status === 'pendente').length;
+    } catch { /* sem acesso, ignora */ }
+  }
+
+  content.innerHTML = `
+    ${visaoGeralHeader()}
+    <div class="grid sm:grid-cols-2 gap-4 mb-6">
+      ${statCard('fa-sack-dollar', 'Saldo Geral (NFP)', fmtMoney(saldoData.data.saldo), 'bg-emerald-50 text-emerald-600', '#/financeiro-geral')}
+      ${statCard('fa-money-bill-transfer', 'Repasses pendentes', totalPendentes, 'bg-amber-50 text-amber-600', '#/repasses')}
+    </div>
+    <div class="gs-card p-5">
+      <h3 class="font-semibold text-gray-700 mb-3"><i class="fas fa-bolt mr-1 text-brand-500"></i>Ações rápidas</h3>
+      <div class="flex flex-wrap gap-2">
+        <button onclick="window.location.hash='#/financeiro-geral'; setTimeout(openImportarNfpModal, 150)" class="text-xs font-medium px-3 py-2 rounded-lg bg-brand-600 text-white hover:opacity-90"><i class="fas fa-file-import mr-1"></i>Importar planilha da NFP</button>
+        <a href="#/repasses" class="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"><i class="fas fa-money-bill-transfer mr-1"></i>Aprovar/Executar repasses</a>
+        <a href="#/financeiro-geral" class="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"><i class="fas fa-sack-dollar mr-1"></i>Painel Financeiro Geral</a>
+      </div>
+    </div>`;
+}
+
+// ---- ARTICULADOR: panorama de colaboradores ----
+async function renderVisaoGeralArticulador(content) {
+  const { data: colabData } = await axios.get('/api/colaboradores/gestao');
+  const colaboradores = colabData.data;
+  const { data: nucleosData } = await axios.get('/api/nucleos');
+
+  const validados = colaboradores.filter(c => c.validado_em).length;
+  const pendentes = colaboradores.length - validados;
+  const porNucleo = {};
+  colaboradores.forEach(c => {
+    const key = c.nucleo_id || 'sem_nucleo';
+    porNucleo[key] = (porNucleo[key] || 0) + 1;
+  });
+
+  content.innerHTML = `
+    ${visaoGeralHeader()}
+    <div class="grid sm:grid-cols-3 gap-4 mb-6">
+      ${statCard('fa-address-card', 'Colaboradores', colaboradores.length, 'bg-amber-50 text-amber-600', '#/colaboradores')}
+      ${statCard('fa-circle-check', 'Validados', validados, 'bg-emerald-50 text-emerald-600', '#/colaboradores')}
+      ${statCard('fa-clock', 'Pendentes de validação', pendentes, 'bg-gray-100 text-gray-500', '#/colaboradores')}
+    </div>
+    <div class="gs-card p-5">
+      <h3 class="font-semibold text-gray-700 mb-3">Colaboradores por Núcleo</h3>
+      <ul class="text-sm space-y-1">
+        ${nucleosData.data.map(n => `
+          <li class="flex items-center justify-between border-b last:border-0 py-1.5">
+            <span>${n.nome}</span>
+            <span class="font-medium text-gray-700">${porNucleo[n.id] || 0}</span>
+          </li>`).join('') || '<li class="text-gray-400">Nenhum núcleo cadastrado.</li>'}
+      </ul>
+      <div class="flex gap-2 mt-4">
+        <a href="#/comunicacao" class="text-xs font-medium px-3 py-2 rounded-lg bg-brand-600 text-white hover:opacity-90"><i class="fas fa-bullhorn mr-1"></i>Nova campanha</a>
+        <a href="#/colaboradores" class="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50"><i class="fas fa-address-card mr-1"></i>Ver colaboradores</a>
       </div>
     </div>`;
 }
@@ -1256,7 +1417,18 @@ function openExecutarRepasseModal(id) {
 // COLABORADORES
 // ============================================================
 
+// Para Admin/Coord_Geral/Coord_Nucleo: tabela completa com ação de validar.
+// Para Articulador: visão mais CONCISA (cards agrupados por núcleo, sem colunas
+// operacionais de CPF/validação) — ele precisa articular com colaboradores
+// (campanhas de comunicação), não gerenciar cadastro/validação deles.
 async function renderColaboradores() {
+  const { data: nucleosData } = await axios.get('/api/nucleos').catch(() => ({ data: { data: [] } }));
+  window.__nucleosCacheColab = nucleosData.data;
+
+  if (isArticulador() && !isGlobal()) {
+    return renderColaboradoresArticulador();
+  }
+
   const { data } = await axios.get('/api/colaboradores/gestao');
   const colaboradores = data.data;
 
@@ -1285,6 +1457,40 @@ async function renderColaboradores() {
     </div>`;
 }
 
+// Visão concisa do Articulador: filtro por núcleo + cards simples (nome + whatsapp),
+// focada em "quem articular", não em gestão de cadastro.
+async function renderColaboradoresArticulador(nucleoFiltroId) {
+  const nucleos = window.__nucleosCacheColab || [];
+  const params = {};
+  if (nucleoFiltroId) params.nucleo_id = nucleoFiltroId;
+  const { data } = await axios.get('/api/colaboradores/gestao', { params });
+  const colaboradores = data.data;
+
+  document.getElementById('page-content').innerHTML = `
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+      <p class="text-sm text-gray-500">${colaboradores.length} colaborador(es) ${nucleoFiltroId ? 'neste núcleo' : 'no total'}</p>
+      <div class="flex items-center gap-2">
+        <select id="filtro-nucleo-colab" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
+          <option value="">Todos os núcleos</option>
+          ${nucleos.map(n => `<option value="${n.id}" ${String(nucleoFiltroId) === String(n.id) ? 'selected' : ''}>${n.nome}</option>`).join('')}
+        </select>
+        <a href="#/comunicacao" class="text-xs font-medium px-3 py-2 rounded-lg bg-brand-600 text-white hover:opacity-90 whitespace-nowrap"><i class="fas fa-bullhorn mr-1"></i>Nova campanha</a>
+      </div>
+    </div>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      ${colaboradores.map(cl => `
+        <div class="gs-card p-4">
+          <p class="font-semibold text-gray-800 truncate">${cl.nome}</p>
+          <p class="text-xs text-gray-400 mb-2"><i class="fab fa-whatsapp mr-1 text-emerald-500"></i>${cl.whatsapp}</p>
+          <span class="text-xs font-medium px-2 py-0.5 rounded-full ${cl.validado_em ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${cl.validado_em ? 'Validado' : 'Pendente'}</span>
+        </div>`).join('') || '<p class="text-gray-400 col-span-full text-center py-8">Nenhum colaborador encontrado.</p>'}
+    </div>`;
+
+  document.getElementById('filtro-nucleo-colab').addEventListener('change', (e) => {
+    renderColaboradoresArticulador(e.target.value || undefined);
+  });
+}
+
 async function validarColaborador(id) {
   try {
     await axios.post(`/api/colaboradores/gestao/${id}/validar`);
@@ -1294,48 +1500,167 @@ async function validarColaborador(id) {
 }
 
 // ============================================================
-// USUÁRIOS & PERMISSÕES (admin/coord_geral)
+// USUÁRIOS & PERMISSÕES (somente admin)
 // ============================================================
+//
+// Tela redesenhada: lista em CARDS (nome + papel + status) para leitura rápida;
+// clicar em um card abre um modal de DETALHE/EDIÇÃO que consolida todas as
+// ações sensíveis (trocar papel, promover a admin, resetar senha, ativar/
+// desativar, excluir) em um único lugar, em vez de botões inline espalhados
+// numa tabela densa.
 
 let USUARIOS_CACHE = [];
+let USUARIOS_FILTRO = '';
+
+function roleBadgeColor(role) {
+  const map = {
+    admin: 'bg-purple-100 text-purple-700',
+    coord_geral: 'bg-blue-100 text-blue-700',
+    coord_nucleo: 'bg-teal-100 text-teal-700',
+    financeiro: 'bg-emerald-100 text-emerald-700',
+    articulador: 'bg-amber-100 text-amber-700'
+  };
+  return map[role] || 'bg-gray-100 text-gray-700';
+}
+
+function usuarioIniciais(nome) {
+  return (nome || '?').trim().split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+}
 
 async function renderUsuarios() {
   const { data } = await axios.get('/api/auth/usuarios');
-  const usuarios = data.data;
-  USUARIOS_CACHE = usuarios;
+  USUARIOS_CACHE = data.data;
+  renderUsuariosLista();
+}
+
+function renderUsuariosLista() {
+  const termo = USUARIOS_FILTRO.trim().toLowerCase();
+  const usuarios = USUARIOS_CACHE.filter(u =>
+    !termo || u.nome.toLowerCase().includes(termo) || u.email.toLowerCase().includes(termo)
+  );
 
   document.getElementById('page-content').innerHTML = `
-    <div class="flex justify-between items-center mb-4">
-      <p class="text-sm text-gray-500">${usuarios.length} usuário(s)</p>
+    <div class="flex flex-wrap justify-between items-center gap-3 mb-4">
+      <div class="flex items-center gap-3">
+        <p class="text-sm text-gray-500">${USUARIOS_CACHE.length} usuário(s)</p>
+        <input id="filtro-usuarios" type="text" placeholder="Buscar por nome ou e-mail..." value="${USUARIOS_FILTRO.replace(/"/g, '&quot;')}"
+          class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition w-64" />
+      </div>
       <button onclick="openCreateUsuarioModal()" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-plus mr-1"></i> Novo Usuário</button>
     </div>
-    <div class="gs-card p-5">
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead><tr class="text-left text-gray-500 border-b">
-            <th class="py-2 pr-3">Nome</th><th class="py-2 pr-3">E-mail</th><th class="py-2 pr-3">Papéis</th>
-            <th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Ações</th>
-          </tr></thead>
-          <tbody>
-            ${usuarios.map(u => `
-              <tr class="border-b last:border-0">
-                <td class="py-2 pr-3">${u.nome} <span class="text-gray-400 text-xs">#${u.id}</span></td>
-                <td class="py-2 pr-3">${u.email}</td>
-                <td class="py-2 pr-3">${(u.roles || []).map(r => `<span class="text-xs bg-gray-100 px-2 py-0.5 rounded-full mr-1">${ROLE_LABELS[r.role]}${r.escopo_id ? ' #' + r.escopo_id : ''}</span>`).join('')}</td>
-                <td class="py-2 pr-3">${u.ativo ? '<span class="text-emerald-600">Ativo</span>' : '<span class="text-red-500">Inativo</span>'}</td>
-                <td class="py-2 pr-3 space-x-2 whitespace-nowrap">
-                  ${isGlobal() ? `<button onclick="openEditUsuarioModal(${u.id})" class="text-gray-600 hover:underline text-xs"><i class="fas fa-pen mr-0.5"></i>Editar</button>` : ''}
-                  ${isAdmin() ? `<button onclick="resetarSenhaUsuario(${u.id})" class="text-amber-600 hover:underline text-xs"><i class="fas fa-key mr-0.5"></i>Resetar senha</button>` : ''}
-                  ${isAdmin() && !u.roles.some(r => r.role === 'admin') ? `<button onclick="promoverAdmin(${u.id})" class="text-blue-600 hover:underline text-xs">Promover a Admin</button>` : ''}
-                  ${isAdmin() && u.ativo ? `<button onclick="desativarUsuario(${u.id})" class="text-orange-600 hover:underline text-xs">Desativar</button>` : ''}
-                  ${isAdmin() && !u.ativo ? `<button onclick="reativarUsuario(${u.id})" class="text-emerald-600 hover:underline text-xs">Reativar</button>` : ''}
-                  ${isAdmin() ? `<button onclick="excluirUsuario(${u.id})" class="text-red-600 hover:underline text-xs"><i class="fas fa-trash mr-0.5"></i>Excluir</button>` : ''}
-                </td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      ${usuarios.map(u => {
+        const papel = (u.roles || [])[0];
+        return `
+        <button onclick="openUsuarioDetalheModal(${u.id})" class="text-left gs-card gs-card-hover p-4 flex items-center gap-3">
+          <div class="w-11 h-11 rounded-full ${u.ativo ? 'bg-brand-100 text-brand-700' : 'bg-gray-200 text-gray-400'} flex items-center justify-center font-bold shrink-0">${usuarioIniciais(u.nome)}</div>
+          <div class="min-w-0 flex-1">
+            <p class="font-semibold text-gray-800 truncate">${u.nome}</p>
+            <p class="text-xs text-gray-400 truncate mb-1">${u.email}</p>
+            <div class="flex items-center gap-1.5 flex-wrap">
+              ${papel ? `<span class="text-xs font-medium px-2 py-0.5 rounded-full ${roleBadgeColor(papel.role)}">${ROLE_LABELS[papel.role]}${papel.escopo_id ? ' #' + papel.escopo_id : ''}</span>` : '<span class="text-xs text-gray-400 italic">Sem papel</span>'}
+              ${!u.ativo ? '<span class="text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-600">Inativo</span>' : ''}
+            </div>
+          </div>
+          <i class="fas fa-chevron-right text-gray-300"></i>
+        </button>`;
+      }).join('') || '<p class="text-gray-400 col-span-full text-center py-8">Nenhum usuário encontrado.</p>'}
     </div>`;
+
+  document.getElementById('filtro-usuarios').addEventListener('input', (e) => {
+    USUARIOS_FILTRO = e.target.value;
+    renderUsuariosLista();
+  });
+}
+
+// Modal único de detalhe/edição: consolida trocar nome/e-mail/papel, promover a
+// admin, resetar senha e ativar/desativar/excluir — tudo no mesmo lugar.
+function openUsuarioDetalheModal(id) {
+  const usuario = USUARIOS_CACHE.find(u => u.id === id);
+  if (!usuario) return;
+  const papelAtual = (usuario.roles || [])[0] || {};
+  const ehAdmin = papelAtual.role === 'admin';
+  const nucleoOptionsPromise = axios.get('/api/nucleos');
+
+  openModal(`
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-12 h-12 rounded-full ${usuario.ativo ? 'bg-brand-100 text-brand-700' : 'bg-gray-200 text-gray-400'} flex items-center justify-center font-bold text-lg shrink-0">${usuarioIniciais(usuario.nome)}</div>
+      <div class="min-w-0">
+        <h3 class="text-lg font-bold text-gray-800 truncate">${usuario.nome}</h3>
+        <p class="text-xs text-gray-400">#${usuario.id} · ${usuario.ativo ? '<span class="text-emerald-600">Ativo</span>' : '<span class="text-red-500">Inativo</span>'}</p>
+      </div>
+    </div>
+
+    <form id="form-usuario-detalhe" class="space-y-3 border-t border-gray-100 pt-4">
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Nome</label>
+        <input name="nome" required value="${usuario.nome.replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">E-mail</label>
+        <input name="email" type="email" required value="${usuario.email.replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Papel ${ehAdmin ? '<span class="text-xs text-gray-400">(use "Promover a Admin" abaixo para transferir a função de admin — aqui a troca de papel é bloqueada para admins)</span>' : ''}</label>
+        <select name="role" id="detalhe-role-select" ${ehAdmin ? 'disabled' : ''} class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition disabled:bg-gray-100 disabled:text-gray-400">
+          <option value="admin" ${papelAtual.role === 'admin' ? 'selected' : ''}>Administrador</option>
+          <option value="coord_geral" ${papelAtual.role === 'coord_geral' ? 'selected' : ''}>Coordenador Geral</option>
+          <option value="financeiro" ${papelAtual.role === 'financeiro' ? 'selected' : ''}>Financeiro</option>
+          <option value="coord_nucleo" ${papelAtual.role === 'coord_nucleo' ? 'selected' : ''}>Coordenador de Núcleo</option>
+          <option value="articulador" ${papelAtual.role === 'articulador' ? 'selected' : ''}>Articulador</option>
+        </select>
+      </div>
+      <div id="detalhe-nucleo-field" class="hidden">
+        <label class="block text-sm text-gray-600 mb-1">Núcleo</label>
+        <select name="nucleo_id" id="detalhe-nucleo-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></select>
+      </div>
+      <div class="flex justify-end pt-1">
+        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Salvar alterações</button>
+      </div>
+    </form>
+
+    <div class="border-t border-gray-100 mt-4 pt-4">
+      <p class="text-xs font-semibold text-gray-400 uppercase mb-2">Ações</p>
+      <div class="flex flex-wrap gap-2">
+        <button onclick="resetarSenhaUsuario(${usuario.id})" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-amber-200 text-amber-600 hover:bg-amber-50"><i class="fas fa-key mr-1"></i>Resetar senha</button>
+        ${!ehAdmin ? `<button onclick="promoverAdmin(${usuario.id})" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50"><i class="fas fa-user-shield mr-1"></i>Promover a Admin</button>` : ''}
+        ${usuario.ativo
+          ? `<button onclick="desativarUsuario(${usuario.id})" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-orange-200 text-orange-600 hover:bg-orange-50"><i class="fas fa-ban mr-1"></i>Desativar</button>`
+          : `<button onclick="reativarUsuario(${usuario.id})" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-600 hover:bg-emerald-50"><i class="fas fa-rotate-left mr-1"></i>Reativar</button>`}
+        <button onclick="excluirUsuario(${usuario.id})" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50"><i class="fas fa-trash mr-1"></i>Excluir</button>
+      </div>
+    </div>
+
+    <div class="flex justify-end pt-4">
+      <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Fechar</button>
+    </div>`);
+
+  const roleSelect = document.getElementById('detalhe-role-select');
+  const nucleoField = document.getElementById('detalhe-nucleo-field');
+  const nucleoSelect = document.getElementById('detalhe-nucleo-select');
+
+  nucleoOptionsPromise.then(({ data }) => {
+    nucleoSelect.innerHTML = data.data.map(n => `<option value="${n.id}" ${papelAtual.escopo_id === n.id ? 'selected' : ''}>${n.nome}</option>`).join('');
+  });
+
+  function toggleNucleoField() {
+    nucleoField.classList.toggle('hidden', roleSelect.value !== 'coord_nucleo');
+  }
+  roleSelect.addEventListener('change', toggleNucleoField);
+  toggleNucleoField();
+
+  document.getElementById('form-usuario-detalhe').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    if (ehAdmin) delete body.role; // papel de admin só muda via "Promover a Admin" de outro usuário
+    if (body.nucleo_id) body.nucleo_id = parseInt(body.nucleo_id);
+    try {
+      await axios.put(`/api/auth/usuarios/${id}`, body);
+      closeModal();
+      toast('Usuário atualizado com sucesso.');
+      renderUsuarios();
+    } catch (err) { toast(apiErr(err), 'error'); }
+  });
 }
 
 function openCreateUsuarioModal() {
@@ -1395,68 +1720,6 @@ function openCreateUsuarioModal() {
       await axios.post('/api/auth/usuarios', body);
       closeModal();
       toast('Usuário criado com sucesso.');
-      renderUsuarios();
-    } catch (err) { toast(apiErr(err), 'error'); }
-  });
-}
-
-function openEditUsuarioModal(id) {
-  const usuario = USUARIOS_CACHE.find(u => u.id === id);
-  if (!usuario) return;
-  const papelAtual = (usuario.roles || [])[0] || {};
-  const nucleoOptionsPromise = axios.get('/api/nucleos');
-
-  openModal(`
-    <h3 class="text-lg font-bold text-gray-800 mb-4">Editar Usuário</h3>
-    <form id="form-editar-usuario" class="space-y-3">
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">Nome</label>
-        <input name="nome" required value="${usuario.nome}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
-      </div>
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">E-mail</label>
-        <input name="email" type="email" required value="${usuario.email}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
-      </div>
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">Papel</label>
-        <select name="role" id="edit-role-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
-          ${isAdmin() ? `<option value="admin" ${papelAtual.role === 'admin' ? 'selected' : ''}>Administrador</option><option value="coord_geral" ${papelAtual.role === 'coord_geral' ? 'selected' : ''}>Coordenador Geral</option><option value="financeiro" ${papelAtual.role === 'financeiro' ? 'selected' : ''}>Financeiro</option>` : ''}
-          <option value="coord_nucleo" ${papelAtual.role === 'coord_nucleo' ? 'selected' : ''}>Coordenador de Núcleo</option>
-          <option value="articulador" ${papelAtual.role === 'articulador' ? 'selected' : ''}>Articulador</option>
-        </select>
-      </div>
-      <div id="edit-nucleo-field" class="hidden">
-        <label class="block text-sm text-gray-600 mb-1">Núcleo</label>
-        <select name="nucleo_id" id="edit-nucleo-select" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition"></select>
-      </div>
-      <div class="flex justify-end gap-2 pt-2">
-        <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Salvar</button>
-      </div>
-    </form>`);
-
-  const roleSelect = document.getElementById('edit-role-select');
-  const nucleoField = document.getElementById('edit-nucleo-field');
-  const nucleoSelect = document.getElementById('edit-nucleo-select');
-
-  nucleoOptionsPromise.then(({ data }) => {
-    nucleoSelect.innerHTML = data.data.map(n => `<option value="${n.id}" ${papelAtual.escopo_id === n.id ? 'selected' : ''}>${n.nome}</option>`).join('');
-  });
-
-  function toggleNucleoField() {
-    nucleoField.classList.toggle('hidden', roleSelect.value !== 'coord_nucleo');
-  }
-  roleSelect.addEventListener('change', toggleNucleoField);
-  toggleNucleoField();
-
-  document.getElementById('form-editar-usuario').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const body = Object.fromEntries(new FormData(e.target).entries());
-    if (body.nucleo_id) body.nucleo_id = parseInt(body.nucleo_id);
-    try {
-      await axios.put(`/api/auth/usuarios/${id}`, body);
-      closeModal();
-      toast('Usuário atualizado com sucesso.');
       renderUsuarios();
     } catch (err) { toast(apiErr(err), 'error'); }
   });

@@ -17,6 +17,13 @@
 ✅ **Gestão completa de usuários** (admin cria/edita/exclui/reseta senha; exclusão inteligente faz soft-delete quando há histórico vinculado — ver seção dedicada abaixo)
 ✅ **Importação da planilha da Nota Fiscal Paulista no Financeiro Geral**, com deduplicação e ignorando linhas "A Calcular"/zeradas (ver seção dedicada abaixo)
 ✅ **Lançamentos manuais no Financeiro Geral** (entrada/saída avulsa, com edição e cancelamento auditados — ver seção dedicada abaixo)
+✅ **Papel único por usuário** (`UNIQUE KEY` em `user_roles.user_id` — um usuário nunca acumula mais de um papel; reatribuição de papel é feita via DELETE+INSERT, nunca soma)
+✅ **Coordenador Geral sem nenhum acesso a Financeiro e a Usuários & Permissões** — RBAC reforçado no backend (`requireRole`) e espelhado no frontend (`hasFinanceiroFullAccess()` = somente admin/financeiro); Visão Geral do Coordenador Geral mostra apenas panorama de núcleos/projetos, nunca dados financeiros
+✅ **Papel Financeiro dedicado**: único (além do admin) que acessa o Financeiro Geral, importa a planilha NFP, lança manualmente e aprova/executa repasses — sem acesso a Usuários & Permissões
+✅ **Cadastro de Coordenador de Núcleo pelo próprio painel do Núcleo** (`POST /api/nucleos/:id/coordenadores` com `modo: 'novo'` ou `'existente'`), substituindo o fluxo antigo via tela de Usuários
+✅ **Usuários & Permissões redesenhado**: grade de cards (nome + papel) com modal único de detalhe/edição (substituindo tabela densa + múltiplos modais) — reúne editar dados, resetar senha, promover admin, ativar/desativar e excluir em um só lugar
+✅ **Visão Geral por papel**: dashboard inicial agora é renderizado de forma específica para cada papel (admin, coordenador geral, coordenador de núcleo, financeiro, articulador), com indicadores e atalhos relevantes a cada escopo
+✅ **Visão concisa de Colaboradores para o Articulador**: grade de cards com filtro por núcleo, substituindo a tabela de gestão completa (mantida para admin/coord. geral/coord. núcleo)
 ⚠️ **E-mail e WhatsApp em modo STUB** (simulação em log — ver `src/modules/comunicacao/providers.ts`)
 ⚠️ **Senha padrão do admin de seed (`admin123`) ainda ativa em produção** — trocar antes de uso real
 ⚠️ **Confirmar se as variáveis de ambiente `R2_*` estão configuradas no painel da Hostinger** — sem elas, upload/download de comprovantes e galeria falha
@@ -102,12 +109,15 @@ saida_pagamento (Projeto):
 Toda mutação relevante grava uma linha em `audit_log` (nunca editável/deletável via API).
 
 ### Acesso por papel ao módulo financeiro
+> ⚠️ **Atualizado nesta versão**: Coordenador Geral perdeu totalmente o acesso ao módulo Financeiro e à tela de Usuários & Permissões. O papel **Financeiro** passou a ser o responsável operacional pelo Financeiro Geral (junto com o admin).
+
 | Papel | Painel Geral | Painel Núcleo | Painel Projeto | Observações |
 |---|---|---|---|---|
 | Administrador | Total | Total | Total | Único que autoriza repasse Geral→Núcleo e executa repasses/saídas |
-| Coordenador Geral | Ver + lançar entrada + **solicitar** repasse Geral→Núcleo | Ver + solicitar/aprovar repasse Núcleo→Projeto | Ver | Não autoriza repasse Geral→Núcleo |
-| Coordenador de Núcleo | Sem acesso | Ver entradas/saídas do seu Núcleo, solicitar repasse Núcleo→Projeto | Ver + **lançar saídas com comprovantes** (bancário e fiscal) | Escopo restrito ao(s) núcleo(s) sob sua coordenação |
-| Articulador | **Sem acesso** | **Sem acesso** | **Sem acesso** | Somente leitura institucional de Núcleos/Projetos + acesso ao módulo de Comunicação |
+| Financeiro | Total: importa planilha NFP, lança manualmente, aprova e executa repasses | Ver | Ver | Acesso **exclusivo ao módulo Financeiro** — sem acesso a Usuários & Permissões, núcleos/projetos (CRUD) ou comunicação |
+| Coordenador Geral | **Sem acesso** | Sem acesso | Sem acesso | Zero acesso a qualquer rota `/api/financeiro/*` — seu papel é gestão institucional de Núcleos/Projetos, não financeira |
+| Coordenador de Núcleo | Sem acesso | Ver entradas/saídas do seu Núcleo, **solicitar** repasse Núcleo→Projeto | Ver + **lançar saídas com comprovantes** (bancário e fiscal) | Escopo restrito ao(s) núcleo(s) sob sua coordenação; não aprova nem executa repasses |
+| Articulador | **Sem acesso** | **Sem acesso** | **Sem acesso** | Somente leitura institucional de Núcleos/Projetos + acesso ao módulo de Comunicação + visão concisa de Colaboradores |
 | Colaborador | Sem acesso | Sem acesso | Sem acesso | Não acessa o backend/CRM |
 
 ## Principais Endpoints da API
@@ -116,22 +126,30 @@ Toda mutação relevante grava uma linha em `audit_log` (nunca editável/deletá
 |---|---|---|
 | POST | `/api/auth/login` | Público |
 | GET | `/api/auth/me` | Autenticado |
-| POST | `/api/auth/usuarios` | admin, coord_geral |
+| POST | `/api/auth/usuarios` | **somente admin** |
+| GET/PUT/DELETE | `/api/auth/usuarios/:id` | **somente admin** |
 | POST | `/api/auth/usuarios/:id/promover-admin` | **somente admin** |
+| POST | `/api/auth/usuarios/:id/resetar-senha`, `/reativar` | **somente admin** |
 | GET/POST | `/api/nucleos` | conforme escopo |
-| POST | `/api/nucleos/:id/coordenadores` | admin, coord_geral |
+| POST | `/api/nucleos/:id/coordenadores` (body `{modo: 'novo'\|'existente', nome?, email?, senha?}`) | admin, coord_geral — `modo:'existente'` reatribui papel de um usuário já cadastrado (bloqueado para admin/coord_geral/financeiro, salvo se o ator for admin); `modo:'novo'` (padrão) cria usuário + papel |
+| DELETE | `/api/nucleos/:id/coordenadores/:userId` | admin, coord_geral |
 | GET/POST | `/api/projetos` | conforme escopo |
 | POST | `/api/projetos/:id/galeria` | admin, coord_geral, coord_nucleo do núcleo |
-| POST | `/api/financeiro/geral/entradas` | admin, coord_geral |
-| POST | `/api/financeiro/repasses/geral-nucleo` | admin, coord_geral (apenas solicita) |
-| POST | `/api/financeiro/repasses/nucleo-projeto` | admin, coord_geral, coord_nucleo do núcleo |
-| POST | `/api/financeiro/repasses/:id/aprovar` | **repasse Geral→Núcleo: somente admin**; repasse Núcleo→Projeto: admin ou coord_geral |
-| POST | `/api/financeiro/repasses/:id/rejeitar` | admin, coord_geral |
-| POST | `/api/financeiro/repasses/:id/executar` (multipart, comprovante_bancario) | **somente admin** |
-| POST | `/api/financeiro/projeto/:id/saidas` (multipart, comprovante_bancario + comprovante_fiscal) | admin, coord_geral, **coord_nucleo do núcleo responsável pelo projeto** |
-| GET/POST | `/api/comunicacao/campanhas`, `/api/comunicacao/campanhas/:id/enviar` | admin, coord_geral, coord_nucleo, articulador (Articulador NÃO tem acesso a nenhuma rota `/api/financeiro/*`) |
-| GET | `/api/financeiro/lancamentos/:id/comprovantes` | mesmo escopo do lançamento (admin/coord_geral/coord_nucleo do núcleo) |
+| POST | `/api/financeiro/geral/entradas` | **admin, financeiro** |
+| POST | `/api/financeiro/geral/importar-nfp` | **admin, financeiro** |
+| POST/PUT | `/api/financeiro/geral/lancamentos-manuais`, `/:id` | **admin, financeiro** |
+| DELETE | `/api/financeiro/geral/lancamentos-manuais/:id` | **somente admin** |
+| GET | `/api/financeiro/geral/importacoes`, `/importacoes/:id/arquivo`, `/saldo`, `/lancamentos`, `/buscar` | **admin, financeiro** |
+| POST | `/api/financeiro/repasses/geral-nucleo` | **admin, financeiro** (solicita) |
+| POST | `/api/financeiro/repasses/nucleo-projeto` | admin, financeiro, coord_nucleo do núcleo (solicita) |
+| POST | `/api/financeiro/repasses/:id/aprovar` | **admin, financeiro** (ambos os tipos de repasse) |
+| POST | `/api/financeiro/repasses/:id/rejeitar` | **admin, financeiro** |
+| POST | `/api/financeiro/repasses/:id/executar` (multipart, comprovante_bancario) | **admin, financeiro** |
+| POST | `/api/financeiro/projeto/:id/saidas` (multipart, comprovante_bancario + comprovante_fiscal) | admin, **coord_nucleo do núcleo responsável pelo projeto** (coord_geral e financeiro **não** lançam saída de projeto) |
+| GET/POST | `/api/comunicacao/campanhas`, `/api/comunicacao/campanhas/:id/enviar` | admin, coord_geral, coord_nucleo, articulador (nenhum deles acessa `/api/financeiro/*`, exceto conforme tabela acima) |
+| GET | `/api/financeiro/lancamentos/:id/comprovantes` | mesmo escopo do lançamento (admin/financeiro/coord_nucleo do núcleo) |
 | GET | `/api/financeiro/comprovantes/:id/arquivo` | mesmo escopo do lançamento — baixa o arquivo (ver "Ciclo de vida dos comprovantes" abaixo) |
+| GET | `/api/colaboradores/gestao` (param opcional `nucleo_id`) | admin, coord_geral, coord_nucleo (escopo do núcleo), **articulador (todos os núcleos ou filtrado por `nucleo_id`)** |
 | POST | `/api/public/colaborador` | Público (sem login) |
 | GET | `/n/:slug`, `/p/:slug` | Público (sem login) |
 
@@ -248,13 +266,14 @@ Validado localmente, de ponta a ponta, contra MySQL real (MariaDB) e um storage 
 - **Correção de RBAC também aplicada nesta mudança**: a rota `GET /api/financeiro/comprovantes/:id/arquivo` **não validava escopo** (qualquer usuário autenticado podia baixar qualquer comprovante por id). Corrigido para aplicar a mesma regra de acesso usada na listagem (`userCanAccessNucleo` / `isGlobalUser`) — testado com usuário `articulador` (sem acesso financeiro) tentando baixar um comprovante fora de seu alcance → corretamente bloqueado com 403.
 
 ## Não implementado / Próximos passos
-1. **Deploy real na Hostinger** — aguardando push ao GitHub e configuração do Node.js App no hPanel (ver seção de Deploy acima).
-2. **Credenciais reais do Cloudflare R2** — localmente testado apenas com placeholder; upload de comprovantes/galeria só funcionará em produção com chaves reais configuradas.
+1. **Credenciais reais do Cloudflare R2 em produção** — confirmar no hPanel que `R2_ENDPOINT`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`/`R2_BUCKET_NAME` estão preenchidas; sem elas, upload/download de comprovantes e galeria falha.
+2. **Trocar a senha do admin de seed (`admin123`)** em produção antes de uso real.
 3. **Provedores reais de E-mail/WhatsApp** — substituir stubs em `src/modules/comunicacao/providers.ts` (ex.: Resend, WhatsApp Business Cloud API).
 4. **Campo de e-mail no colaborador** — atualmente o formulário público só coleta WhatsApp; se e-mail for necessário para campanhas, adicionar coluna e ajustar disparo.
 5. **Upload de imagem de capa** de núcleo/projeto (`imagem_capa_key` já existe no schema, falta rota de upload dedicada).
 6. **Paginação** nas listagens (colaboradores, lançamentos, usuários) para volumes grandes.
-7. **Testes automatizados** (unitários/integração) — validação até agora foi manual via curl.
+7. **Testes automatizados** (unitários/integração) — validação até agora foi manual via curl e smoke test funcional.
+8. **HTTPS/SSL do domínio `nfp.social.br`** — depende da propagação de DNS concluída na Hostinger.
 
 ## Segurança
 - Senhas com PBKDF2 (100.000 iterações, SHA-256) via Web Crypto API — sem dependências externas, funciona igual em Node.js 18+.
@@ -263,11 +282,25 @@ Validado localmente, de ponta a ponta, contra MySQL real (MariaDB) e um storage 
 - Isolamento de dados por núcleo garantido nas queries SQL (nunca por filtro client-side).
 - Nenhuma credencial (MySQL, R2, JWT_SECRET) é commitada no repositório — todas vêm de variáveis de ambiente (`.env` local / hPanel em produção).
 
-## Gestão de Usuários (novo)
-- **Admin**: cria, edita, exclui e reseta senha de qualquer usuário (`POST/PUT/DELETE /api/auth/usuarios/:id`, `POST /api/auth/usuarios/:id/resetar-senha`, `POST /api/auth/usuarios/:id/reativar`).
-- **Coord. Geral**: cria/edita apenas `coord_nucleo` e `articulador` (nunca admin/coord_geral).
+## Gestão de Usuários e Permissões (atualizado)
+- **Somente admin** acessa a tela de Usuários & Permissões e as rotas `/api/auth/usuarios*` — Coordenador Geral **não tem mais acesso** a esta área (mudança desta versão).
+- **Papel único por usuário**: `user_roles.user_id` tem `UNIQUE KEY` — reatribuir o papel de um usuário é sempre DELETE+INSERT, nunca uma soma de papéis.
+- **Cadastro de Coordenador de Núcleo** passou a ser feito **pelo próprio painel do Núcleo** (`POST /api/nucleos/:id/coordenadores`), não mais pela tela de Usuários — suporta `modo: 'novo'` (cria usuário novo) ou `modo: 'existente'` (reatribui o papel de um usuário já cadastrado, por e-mail).
+- **Interface em cards**: a tela de Usuários & Permissões foi redesenhada — grade de cards (nome + papel, com cor por papel) substituindo a tabela densa; clicar no card abre um modal único que reúne edição de dados, troca de papel, resetar senha, promover a admin, ativar/desativar e excluir.
 - **Exclusão inteligente**: se o usuário tiver histórico vinculado (lançamentos, comprovantes, auditoria etc. — 13 tabelas verificadas), o sistema faz **soft-delete** (`excluido_em` + `ativo=0`, bloqueia login, some da listagem, mas preserva o registro para auditoria); sem histórico, exclui definitivamente.
 - **Reset de senha**: admin define uma senha ou o sistema gera uma temporária exibida uma única vez na tela.
+
+## Visão Geral por papel (novo)
+O dashboard inicial (`renderVisaoGeral()` em `app.js`) agora é dividido por papel, cada um com indicadores e atalhos próprios:
+- **Admin**: saldo geral consolidado, contagem de núcleos/projetos/colaboradores, atalhos para Repasses, Usuários e Comunicação.
+- **Financeiro**: saldo geral, total de repasses pendentes de aprovação (agregado de núcleos e projetos), atalho direto para importar a planilha NFP e para a tela de Repasses.
+- **Coordenador Geral**: panorama de núcleos/projetos (contagem + status), tabela de núcleos com contagem de projetos — **sem nenhum dado financeiro**.
+- **Coordenador de Núcleo**: saldo do seu próprio núcleo, lista de projetos do núcleo com status, atalho para criar novo projeto.
+- **Articulador**: panorama de colaboradores (total/validados/pendentes), detalhamento por núcleo, atalhos para Comunicação e para a tela de Colaboradores.
+
+## Colaboradores — visão concisa para o Articulador (novo)
+- `GET /api/colaboradores/gestao` aceita filtro opcional `?nucleo_id=`.
+- Para o papel **Articulador**, a tela de Colaboradores exibe uma grade de cards concisa (nome, WhatsApp, status validado/pendente) com um seletor de núcleo para filtrar — em vez da tabela de gestão completa usada por admin/coord. geral/coord. núcleo.
 
 ## Importação da planilha NFP (novo)
 - `POST /api/financeiro/geral/importar-nfp` (admin, coord_geral): recebe o CSV exportado da "Consulta de Créditos" do site da NFP.
