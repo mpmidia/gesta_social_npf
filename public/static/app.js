@@ -112,14 +112,9 @@ function buildNav() {
     items.push({ href: '#/financeiro-geral', icon: 'fa-sack-dollar', label: 'Financeiro Geral' });
     items.push({ href: '#/repasses', icon: 'fa-money-bill-transfer', label: 'Repasses' });
   }
-  // Coordenador de Núcleo: gestor de recursos do(s) seu(s) núcleo(s) — atalho direto para o
-  // painel financeiro do núcleo (entradas e saídas), sem acesso ao Painel Geral.
-  if (isCoordNucleo() && !isGlobal()) {
-    const meuNucleoId = scopedNucleoIds()[0];
-    if (meuNucleoId) {
-      items.push({ href: `#/nucleos/${meuNucleoId}`, icon: 'fa-wallet', label: 'Meu Financeiro (Núcleo)' });
-    }
-  }
+  // Coordenador de Núcleo: NÃO tem menu financeiro dedicado — ele gerencia os
+  // recursos do seu núcleo diretamente pelas páginas de Núcleos/Projetos
+  // (solicitar repasse, lançar saída), que já aparecem acima.
   // Usuários & Permissões: visível SOMENTE para administradores.
   if (isAdmin()) {
     items.push({ href: '#/usuarios', icon: 'fa-users-gear', label: 'Usuários & Permissões' });
@@ -499,22 +494,22 @@ async function renderNucleoDetalhe(id) {
     </div>
 
     <div class="grid lg:grid-cols-2 gap-4 mb-6">
+      ${canManageCoordenadores ? `
       <div class="gs-card p-5">
         <h3 class="font-semibold text-gray-700 mb-3">Coordenadores</h3>
         <ul class="text-sm space-y-1">
           ${(n.coordenadores || []).map(cd => `
             <li class="flex items-center justify-between gap-2">
               <span><i class="fas fa-user mr-1 text-gray-400"></i> ${cd.nome} (${cd.email})</span>
-              ${canManageCoordenadores ? `
-                <span class="shrink-0 space-x-2">
-                  <button onclick="openAddCoordenadorModal(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-amber-600 hover:underline"><i class="fas fa-retweet mr-0.5"></i>Substituir</button>
-                  <button onclick="removerCoordenador(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-red-500 hover:underline"><i class="fas fa-times mr-0.5"></i>Remover</button>
-                </span>` : ''}
+              <span class="shrink-0 space-x-2">
+                <button onclick="openAddCoordenadorModal(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-amber-600 hover:underline"><i class="fas fa-retweet mr-0.5"></i>Substituir</button>
+                <button onclick="removerCoordenador(${id}, ${cd.id}, '${cd.nome.replace(/'/g, "\\'")}')" class="text-xs text-red-500 hover:underline"><i class="fas fa-times mr-0.5"></i>Remover</button>
+              </span>
             </li>`).join('') || '<li class="text-gray-400">Nenhum coordenador vinculado.</li>'}
         </ul>
-        ${canManageCoordenadores ? `<button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Cadastrar coordenador</button>` : ''}
-      </div>
-      <div class="gs-card p-5">
+        <button onclick="openAddCoordenadorModal(${id})" class="mt-3 text-sm text-brand-600 hover:underline font-medium"><i class="fas fa-plus mr-1"></i>Cadastrar coordenador</button>
+      </div>` : ''}
+      <div class="gs-card p-5 ${canManageCoordenadores ? '' : 'lg:col-span-2'}">
         <h3 class="font-semibold text-gray-700 mb-3">Projetos</h3>
         <ul class="text-sm space-y-1">
           ${(n.projetos || []).map(p => `<li><a href="#/projetos/${p.id}" class="text-brand-600 hover:underline font-medium">${p.nome}</a></li>`).join('') || '<li class="text-gray-400">Nenhum projeto cadastrado.</li>'}
@@ -810,6 +805,12 @@ async function renderProjetoDetalhe(id) {
     saldoHtml = `<p class="text-2xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>`;
   } catch { saldoHtml = '<p class="text-gray-400 text-sm">Sem acesso ao saldo</p>'; }
 
+  let saldoNucleoHtml = '';
+  try {
+    const { data: saldoNucleoData } = await axios.get(`/api/financeiro/nucleo/${p.nucleo_id}/saldo`);
+    saldoNucleoHtml = `<p class="text-2xl font-bold text-brand-600">${fmtMoney(saldoNucleoData.data.saldo)}</p>`;
+  } catch { saldoNucleoHtml = '<p class="text-gray-400 text-sm">Sem acesso ao saldo</p>'; }
+
   // Solicitar repasse do Núcleo para este Projeto: Admin, Financeiro (visão 360°)
   // ou o Coordenador do núcleo dono do projeto. Coordenador Geral NÃO vê financeiro.
   const canRequestRepasse = isAdmin() || isFinanceiro() || scopedNucleoIds().includes(p.nucleo_id);
@@ -835,9 +836,15 @@ async function renderProjetoDetalhe(id) {
           </div>` : ''}
         </div>
       </div>
-      <div class="gs-card p-5">
-        <p class="text-sm text-gray-500 mb-1">Saldo do Projeto</p>
-        ${saldoHtml}
+      <div class="gs-card p-5 space-y-3">
+        <div>
+          <p class="text-sm text-gray-500 mb-1">Saldo do Núcleo</p>
+          ${saldoNucleoHtml}
+        </div>
+        <div class="pt-2 border-t border-gray-100">
+          <p class="text-sm text-gray-500 mb-1">Saldo do Projeto</p>
+          ${saldoHtml}
+        </div>
       </div>
     </div>
 
@@ -897,9 +904,14 @@ async function renderProjetoDetalhe(id) {
       </form>
     </div>` : ''}
 
+    <div class="gs-card p-5 mb-6">
+      <h3 class="font-semibold text-gray-700 mb-3"><i class="fas fa-arrow-down mr-1 text-emerald-500"></i>Repasses Recebidos (Núcleo → Projeto)</h3>
+      <div id="projeto-repasses">Carregando...</div>
+    </div>
+
     <div class="gs-card p-5">
-      <h3 class="font-semibold text-gray-700 mb-3">Histórico Financeiro do Projeto</h3>
-      <div id="projeto-lancamentos">Carregando...</div>
+      <h3 class="font-semibold text-gray-700 mb-3"><i class="fas fa-arrow-up mr-1 text-red-500"></i>Lançamentos de Saída (Pagamentos)</h3>
+      <div id="projeto-saidas">Carregando...</div>
     </div>`;
 
   document.getElementById('form-repasse-projeto')?.addEventListener('submit', async (e) => {
@@ -925,9 +937,14 @@ async function renderProjetoDetalhe(id) {
 
   try {
     const { data: lancamentos } = await axios.get(`/api/financeiro/projeto/${id}/lancamentos`);
-    document.getElementById('projeto-lancamentos').innerHTML = renderLancamentosTable(lancamentos.data);
+    const todos = lancamentos.data || [];
+    const repasses = todos.filter(l => l.tipo === 'repasse_nucleo_projeto');
+    const saidas = todos.filter(l => l.tipo === 'saida_pagamento' || l.tipo === 'saida_manual');
+    document.getElementById('projeto-repasses').innerHTML = renderLancamentosTable(repasses);
+    document.getElementById('projeto-saidas').innerHTML = renderLancamentosTable(saidas);
   } catch {
-    document.getElementById('projeto-lancamentos').innerHTML = '<p class="text-gray-400 text-sm">Sem acesso ao histórico financeiro.</p>';
+    document.getElementById('projeto-repasses').innerHTML = '<p class="text-gray-400 text-sm">Sem acesso ao histórico financeiro.</p>';
+    document.getElementById('projeto-saidas').innerHTML = '<p class="text-gray-400 text-sm">Sem acesso ao histórico financeiro.</p>';
   }
 }
 

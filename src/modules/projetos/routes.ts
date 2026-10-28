@@ -233,8 +233,19 @@ projetos.delete('/:projetoId', requireRole('admin', 'coord_geral', 'coord_nucleo
     })
   }
 
-  // Sem histórico financeiro: exclusão física (remove galeria vinculada antes, se houver).
+  // Colaboradores cadastrados (formulário público) ficam vinculados ao projeto —
+  // são dados de pessoas reais, então a exclusão é bloqueada enquanto existirem.
+  const possuiColaboradores = await c.env.DB.prepare('SELECT 1 FROM colaboradores WHERE projeto_id = ? LIMIT 1')
+    .bind(projetoId)
+    .first()
+  if (possuiColaboradores) {
+    return errorResponse(c, 422, 'Este projeto possui colaboradores cadastrados. Remova-os (ou vincule a outro projeto) antes de excluir.')
+  }
+
+  // Sem histórico financeiro: exclusão física (remove galeria e destaques públicos
+  // vinculados antes, se houver — mesma causa do erro 500 por FK já corrigida em núcleos).
   await c.env.DB.prepare('DELETE FROM projeto_galeria WHERE projeto_id = ?').bind(projetoId).run()
+  await c.env.DB.prepare('DELETE FROM destaques_publicos WHERE projeto_id = ?').bind(projetoId).run()
   await c.env.DB.prepare('DELETE FROM projetos WHERE id = ?').bind(projetoId).run()
 
   await logAudit(c, {

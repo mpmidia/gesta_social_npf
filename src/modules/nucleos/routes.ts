@@ -337,7 +337,22 @@ nucleos.delete('/:nucleoId', requireRole('admin', 'coord_geral'), async (c) => {
     return errorResponse(c, 422, 'Este núcleo possui projetos vinculados. Remova ou arquive os projetos antes de excluir o núcleo.')
   }
 
-  // Exclusão física: remove coordenadores vinculados e o núcleo.
+  // Colaboradores cadastrados (formulário público) ficam vinculados ao núcleo —
+  // são dados de pessoas reais (CPF, WhatsApp), então a exclusão do núcleo é
+  // bloqueada enquanto existirem, em vez de apagá-los silenciosamente junto.
+  const possuiColaboradores = await c.env.DB.prepare('SELECT 1 FROM colaboradores WHERE nucleo_id = ? LIMIT 1')
+    .bind(nucleoId)
+    .first()
+  if (possuiColaboradores) {
+    return errorResponse(c, 422, 'Este núcleo possui colaboradores cadastrados. Remova-os (ou vincule a outro núcleo) antes de excluir.')
+  }
+
+  // Exclusão física: remove destaques públicos (chamadas/campanhas da landing
+  // page, sem valor de auditoria), coordenadores vinculados e o núcleo.
+  // IMPORTANTE: sem este DELETE em destaques_publicos, a exclusão falhava com
+  // erro 500 (FK constraint fk_destaques_nucleo) sempre que o núcleo tivesse
+  // algum destaque público cadastrado (ex.: o núcleo de exemplo do seed).
+  await c.env.DB.prepare('DELETE FROM destaques_publicos WHERE nucleo_id = ?').bind(nucleoId).run()
   await c.env.DB.prepare("DELETE FROM user_roles WHERE role = 'coord_nucleo' AND escopo_id = ?").bind(nucleoId).run()
   await c.env.DB.prepare('DELETE FROM nucleos WHERE id = ?').bind(nucleoId).run()
 
