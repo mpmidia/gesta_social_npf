@@ -7,7 +7,7 @@ import { createToken, COOKIE_NAME } from '../../utils/jwt'
 import { errorResponse, okResponse } from '../../utils/response'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
-import { requireRole, isAdmin } from '../../middlewares/rbac'
+import { requireRole } from '../../middlewares/rbac'
 
 const auth = new Hono<AppEnv>()
 
@@ -583,42 +583,6 @@ auth.delete('/usuarios/:id', authMiddleware, requireRole('admin'), async (c) => 
   })
 
   return okResponse(c, { message: `${target.nome} foi excluído permanentemente.` })
-})
-
-// ===== DIAGNÓSTICO TEMPORÁRIO: testa a conexão com o R2 (somente admin) =====
-// Usado para identificar, sem expor segredos, qual variável de ambiente do
-// R2 (R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET_NAME)
-// está causando falha no upload de comprovantes em produção. Remover após o
-// diagnóstico.
-auth.get('/diag/r2', authMiddleware, requireRole('admin'), async (c) => {
-  const env = {
-    R2_ENDPOINT: process.env.R2_ENDPOINT || null,
-    R2_BUCKET_NAME: process.env.R2_BUCKET_NAME || null,
-    R2_ACCESS_KEY_ID_set: !!process.env.R2_ACCESS_KEY_ID,
-    R2_ACCESS_KEY_ID_len: (process.env.R2_ACCESS_KEY_ID || '').length,
-    R2_SECRET_ACCESS_KEY_set: !!process.env.R2_SECRET_ACCESS_KEY,
-    R2_SECRET_ACCESS_KEY_len: (process.env.R2_SECRET_ACCESS_KEY || '').length
-  }
-
-  let putResult: any = { ok: false }
-  try {
-    const key = `diag/teste-${Date.now()}.txt`
-    await c.env.R2.put(key, new TextEncoder().encode('diagnostico r2').buffer, {
-      httpMetadata: { contentType: 'text/plain' }
-    })
-    putResult = { ok: true, key }
-  } catch (err: any) {
-    putResult = {
-      ok: false,
-      name: err?.name,
-      message: err?.message,
-      code: err?.Code || err?.code,
-      httpStatusCode: err?.$metadata?.httpStatusCode,
-      hostname: err?.hostname || err?.address || null
-    }
-  }
-
-  return okResponse(c, { env, putResult })
 })
 
 export default auth
