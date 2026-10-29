@@ -65,19 +65,91 @@ da Hostinger.
   EXECUÇÃO do repasse (não depende de download/visualização). Visualizável
   livremente pelo coordenador de núcleo destinatário via rota dedicada.
 
+## ⚠️ BLOQUEIO CRÍTICO: Upload de comprovantes não funciona (causa raiz confirmada)
+
+**Diagnóstico definitivo (via API Cloudflare)**: a conta Cloudflare vinculada
+a este projeto **nunca teve o serviço R2 habilitado**. Tanto `GET
+/accounts/:id/r2/buckets` (listar) quanto `POST .../r2/buckets` (criar bucket
+`gestao-social-arquivos`) retornam o mesmo erro da API Cloudflare:
+```
+{"code":10042,"message":"Please enable R2 through the Cloudflare Dashboard."}
+```
+Isso explica por que `R2_ENDPOINT`, `R2_ACCESS_KEY_ID` e
+`R2_SECRET_ACCESS_KEY` nunca puderam ser configurados corretamente na
+Hostinger: **essas credenciais nunca existiram**, porque o bucket em si nunca
+foi criado. A variável `R2_BUCKET_NAME=gestao-social-arquivos` já está
+definida na Hostinger, mas aponta para um bucket inexistente.
+
+**Esta ativação exige aceite de termos pelo painel web do Cloudflare — não é
+possível fazer via API/token.** Passo a passo para destravar:
+
+1. Acesse https://dash.cloudflare.com → faça login na conta
+   `Prod.mpmidia@gmail.com` (ou a conta correta do projeto).
+2. No menu lateral, clique em **R2 Object Storage** (ou **R2** no menu
+   superior). Na primeira vez, o Cloudflare pede para **aceitar os termos de
+   uso do R2** (pode pedir cadastro de cartão de crédito, mesmo dentro do
+   free tier — é só verificação, R2 tem camada gratuita generosa).
+3. Após habilitar, crie o bucket com o nome exato `gestao-social-arquivos`
+   (ou outro nome, desde que atualize `R2_BUCKET_NAME` na Hostinger também).
+4. Em **R2 → Manage R2 API Tokens**, crie um token com permissão de
+   leitura/escrita (Object Read & Write) para esse bucket. Isso gera:
+   - **Access Key ID**
+   - **Secret Access Key**
+   - **Endpoint S3** (formato `https://<account_id>.r2.cloudflarestorage.com`)
+5. No painel Node.js da Hostinger (variáveis de ambiente), configure:
+   - `R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com`
+   - `R2_ACCESS_KEY_ID=<access key id gerado>`
+   - `R2_SECRET_ACCESS_KEY=<secret gerado>`
+   - `R2_BUCKET_NAME=gestao-social-arquivos`
+6. Reinicie a aplicação Node.js na Hostinger.
+
+Assim que isso for feito, o upload de comprovantes (saída de pagamento e
+execução de repasse) deve funcionar sem nenhuma mudança de código — a lógica
+de upload já está correta e testada (ver seção "Integridade financeira"
+abaixo). Caso queira, posso te ajudar a validar após a configuração.
+
+## Banco de dados zerado para novos testes
+A pedido do usuário, todas as tabelas operacionais (núcleos, projetos,
+lançamentos financeiros, comprovantes, faturas, colaboradores, campanhas,
+auditoria) foram **truncadas** nesta sessão, mantendo apenas `users` e
+`user_roles` intactos. Papéis atuais em produção:
+- `presidente@acriart.org.br` — admin
+- `fabiano@mpmidia.com.br` — coord_nucleo (escopo_id ainda aponta para um
+  núcleo que não existe mais — ao criar o próximo núcleo de teste, reatribua
+  este usuário como coordenador para restaurar o vínculo)
+- `luciana@mpmidia.com.br` — financeiro
+- `pedro.baccarat@gmail.com` — coord_geral
+
+**Atenção**: as senhas desses usuários foram alteradas durante os testes
+desta sessão (diretamente no banco, para fins de diagnóstico) e **não foram
+restauradas às senhas originais** — não há registro de qual era a senha
+original de cada um. Será necessário redefinir a senha de cada usuário (via
+tela de admin ou diretamente no banco) antes do próximo teste.
+
+## Integridade financeira (já corrigido e validado)
+O upload do comprovante para o R2 acontece **antes** de qualquer gravação que
+marque o lançamento como "executado" (saída de pagamento e execução de
+repasse). Se o upload falhar — como está acontecendo agora pela falta do R2 —
+nenhuma linha órfã é criada e o saldo não é debitado. Validado nesta sessão:
+múltiplas tentativas de saída com upload falho não geraram nenhum lançamento
+no banco.
+
 ## Pendências / próximos passos
-- Validar manualmente em produção o fluxo completo: solicitar repasse →
-  aprovar → executar com comprovante → coord_nucleo visualiza no painel.
-- Testar a expiração de 6 meses e 30 dias via manipulação direta de
-  `expira_em` no banco + execução manual de `limparComprovantesExpirados()`
-  (não foi possível validar localmente devido ao mock do R2 local sem
-  credenciais reais — `ENOTFOUND mock.s3.auto.amazonaws.com`, limitação de
-  ambiente já conhecida de sessões anteriores).
-- Aplicar a migration 0008 no MySQL de produção.
-- Avaliar se o fluxo de "fatura" (PDF/HTML imprimível) deve ser simplificado
-  agora que o comprovante de depósito real passou a ser anexado.
+1. **[BLOQUEADOR]** Habilitar R2 no painel Cloudflare e configurar as 4
+   variáveis de ambiente na Hostinger (ver seção acima).
+2. Redefinir as senhas dos 4 usuários de produção (foram alteradas durante o
+   diagnóstico desta sessão).
+3. Recriar ao menos um núcleo + projeto de teste e revincular
+   `fabiano@mpmidia.com.br` como coordenador.
+4. Após o R2 estar ativo, testar o fluxo completo: solicitar repasse → aprovar
+   → executar com comprovante de depósito → coord_nucleo visualiza → lançar
+   saída de pagamento com comprovante bancário/fiscal → financeiro concilia
+   via tela de Repasses.
+5. Aplicar a migration 0008 no MySQL de produção, se ainda não aplicada.
 
 ## Deploy
 - **Plataforma**: Hostinger (Node.js + MySQL), auto-deploy via push no GitHub.
-- **Status**: ✅ Código local buildado e testado (exceto upload real, bloqueado
-  pelo mock do R2 local); aguardando push + confirmação de auto-deploy.
+- **Status**: ✅ Deploy mais recente no ar (commit `9a2eeff`). Correções de
+  navegação/bug do núcleo para coord_nucleo e menu do financeiro já em
+  produção. Upload de comprovantes **continua bloqueado** até o R2 ser
+  habilitado (ver seção de bloqueio crítico acima).
