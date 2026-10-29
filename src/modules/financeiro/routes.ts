@@ -38,7 +38,7 @@ async function getNucleoIdFromProjeto(db: AppDatabase, projetoId: number): Promi
 
 async function uploadComprovanteFile(
   r2: AppBucket,
-  lancamentoId: number,
+  lancamentoId: number | string,
   tipo: 'bancario' | 'fiscal' | 'deposito',
   file: File
 ): Promise<string> {
@@ -556,21 +556,28 @@ financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo
     return errorResponse(c, 422, `Saldo insuficiente no projeto. Saldo atual: R$ ${saldoAtual.toFixed(2)}.`)
   }
 
-  // 1) Insere o lançamento (executado diretamente, pois só admin lança e já com comprovantes em mãos)
-  const insertLancamento = await c.env.DB.prepare(
-    `INSERT INTO financeiro_lancamentos (nivel, projeto_id, nucleo_id, tipo, valor, status, finalidade, executado_por, executado_em)
-     VALUES ('projeto', ?, ?, 'saida_pagamento', ?, 'executado', ?, ?, CURRENT_TIMESTAMP)`
-  )
-    .bind(projetoId, projeto.nucleo_id, valor, finalidade, actor.sub)
-    .run()
+  // 1) Upload dos arquivos para o R2 PRIMEIRO. Se o armazenamento falhar (ex.:
+  // credenciais/endpoint do R2 incorretos), a exceção é lançada ANTES de
+  // qualquer gravação no banco — não deve existir saída "executada" (com
+  // saldo já debitado) sem os dois comprovantes obrigatórios anexados.
+  // Usamos um ID temporário (timestamp) para nomear os arquivos no R2 antes
+  // de sabermos o ID definitivo do lançamento, já que o upload precisa
+  // acontecer antes do INSERT.
+  const tempId = `tmp-${Date.now()}-${generateRandomKey().slice(0, 6)}`
+  const bancarioKey = await uploadComprovanteFile(c.env.R2, tempId as any, 'bancario', comprovanteBancario)
+  const fiscalKey = await uploadComprovanteFile(c.env.R2, tempId as any, 'fiscal', comprovanteFiscal)
 
-  const lancamentoId = insertLancamento.meta.last_row_id as number
+  // 2) Só agora que os arquivos já estão salvos com sucesso no R2, grava o
+  // lançamento (executado) e os dois registros de comprovante — atomicamente,
+  // via batch (transação real no MySQL).
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO financeiro_lancamentos (nivel, projeto_id, nucleo_id, tipo, valor, status, finalidade, executado_por, executado_em)
+       VALUES ('projeto', ?, ?, 'saida_pagamento', ?, 'executado', ?, ?, CURRENT_TIMESTAMP)`
+    ).bind(projetoId, projeto.nucleo_id, valor, finalidade, actor.sub)
+  ])
+  const lancamentoId = results[0].meta.last_row_id as number
 
-  // 2) Upload dos arquivos para R2 (fora da transação D1, mas obrigatórios antes de finalizar)
-  const bancarioKey = await uploadComprovanteFile(c.env.R2, lancamentoId, 'bancario', comprovanteBancario)
-  const fiscalKey = await uploadComprovanteFile(c.env.R2, lancamentoId, 'fiscal', comprovanteFiscal)
-
-  // 3) Insere os dois comprovantes atomicamente via batch
   await c.env.DB.batch([
     c.env.DB.prepare(
       'INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?)'
@@ -777,6 +784,12 @@ financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), as
 
   const numero = `FAT-${id}-${generateRandomKey().slice(0, 6).toUpperCase()}`
 
+  // Upload do comprovante de depósito para o R2 PRIMEIRO. Se o armazenamento
+  // falhar, a exceção é lançada ANTES de qualquer gravação no banco — não
+  // deve existir repasse marcado como "executado" sem o comprovante de
+  // depósito obrigatório anexado.
+  const depositoKey = await uploadComprovanteFile(c.env.R2, id, 'deposito', comprovanteDeposito)
+
   await c.env.DB.batch([
     c.env.DB.prepare(
       `UPDATE financeiro_lancamentos SET status = 'executado', executado_por = ?, executado_em = CURRENT_TIMESTAMP WHERE id = ?`
@@ -794,21 +807,14 @@ financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), as
       actor.sub,
       enviarPara ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
       enviarPara || null
-    )
+    ),
+    // expira_em já é definido AGORA (execução), não no download/visualização —
+    // retenção de 6 meses independente de quando o coordenador vir o arquivo.
+    c.env.DB.prepare(
+      `INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por, expira_em)
+       VALUES (?, 'deposito', ?, ?, ?, ?)`
+    ).bind(id, depositoKey, comprovanteDeposito.name, actor.sub, dataMaisMeses(RETENCAO_DEPOSITO_MESES))
   ])
-
-  // Upload do comprovante de depósito para R2 (fora da transação do DB, mas
-  // só chega aqui depois do lançamento já marcado como executado).
-  const depositoKey = await uploadComprovanteFile(c.env.R2, id, 'deposito', comprovanteDeposito)
-
-  // expira_em já é definido AGORA (execução), não no download/visualização —
-  // retenção de 6 meses independente de quando o coordenador vir o arquivo.
-  await c.env.DB.prepare(
-    `INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por, expira_em)
-     VALUES (?, 'deposito', ?, ?, ?, ?)`
-  )
-    .bind(id, depositoKey, comprovanteDeposito.name, actor.sub, dataMaisMeses(RETENCAO_DEPOSITO_MESES))
-    .run()
 
   const fatura = await c.env.DB.prepare('SELECT id FROM financeiro_faturas WHERE lancamento_id = ?').bind(id).first<{ id: number }>()
 
