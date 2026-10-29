@@ -58,12 +58,15 @@ app.use('*', async (c, next) => {
 // JSON, para diagnóstico temporário em produção sem expor isso por padrão.
 app.onError((err, c) => {
   console.error('[erro-nao-tratado]', c.req.method, c.req.path, err)
-  const debug = process.env.DEBUG_ERRORS === '1'
+  // TEMP: debug sempre ligado para diagnosticar causa raiz de 500s em
+  // producao (Hostinger nao expoe os logs do PM2 para o agente). Reverter
+  // para "apenas com DEBUG_ERRORS=1" assim que o diagnostico terminar.
   return c.json(
     {
       ok: false,
       error: 'Ocorreu um erro inesperado.',
-      ...(debug ? { debug_message: err.message, debug_stack: err.stack } : {})
+      debug_message: err.message,
+      debug_stack: err.stack
     },
     500
   )
