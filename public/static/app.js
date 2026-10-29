@@ -98,9 +98,14 @@ function buildNav() {
   const items = [];
 
   items.push({ href: '#/', icon: 'fa-chart-line', label: 'Visão Geral' });
-  items.push({ href: '#/nucleos', icon: 'fa-people-group', label: 'Núcleos' });
-  items.push({ href: '#/projetos', icon: 'fa-diagram-project', label: 'Projetos' });
+  // Núcleos/Projetos: o papel Financeiro NÃO precisa navegar por essas páginas —
+  // ele já recebe o contexto (nome do núcleo/projeto) diretamente na tela de
+  // Repasses, onde também anexa o comprovante de depósito e concilia os
+  // comprovantes das saídas. Mantém acesso de API (leitura) para isso funcionar,
+  // só remove os itens do menu.
   if (!isFinanceiro()) {
+    items.push({ href: '#/nucleos', icon: 'fa-people-group', label: 'Núcleos' });
+    items.push({ href: '#/projetos', icon: 'fa-diagram-project', label: 'Projetos' });
     items.push({ href: '#/colaboradores', icon: 'fa-address-card', label: 'Colaboradores' });
   }
 
@@ -547,7 +552,7 @@ async function renderNucleoDetalhe(id) {
       </form>
     </div>` : ''}
 
-    ${hasFinanceiroFullAccess() ? `
+    ${canRequestRepasseNucleo ? `
     <div class="gs-card p-5 mt-6">
       <h3 class="font-semibold text-gray-700 mb-3">Histórico Financeiro do Núcleo</h3>
       <div id="nucleo-lancamentos">Carregando...</div>
@@ -566,11 +571,17 @@ async function renderNucleoDetalhe(id) {
     });
   }
 
-  try {
-    const { data: lancamentos } = await axios.get(`/api/financeiro/nucleo/${id}/lancamentos`);
-    document.getElementById('nucleo-lancamentos').innerHTML = renderLancamentosTable(lancamentos.data);
-  } catch {
-    document.getElementById('nucleo-lancamentos').innerHTML = '<p class="text-gray-400 text-sm">Sem acesso ao histórico financeiro.</p>';
+  // O bloco de histórico financeiro só existe no DOM quando canRequestRepasseNucleo
+  // é verdadeiro (admin/financeiro/coord_nucleo do próprio escopo) — por isso essa
+  // busca só pode rodar sob a mesma condição, senão getElementById retorna null e
+  // quebra a página inteira para quem não tem a seção (ex.: articulador).
+  if (canRequestRepasseNucleo) {
+    try {
+      const { data: lancamentos } = await axios.get(`/api/financeiro/nucleo/${id}/lancamentos`);
+      document.getElementById('nucleo-lancamentos').innerHTML = renderLancamentosTable(lancamentos.data);
+    } catch {
+      document.getElementById('nucleo-lancamentos').innerHTML = '<p class="text-gray-400 text-sm">Sem acesso ao histórico financeiro.</p>';
+    }
   }
 }
 
@@ -1363,7 +1374,7 @@ async function renderRepasses() {
   const tipoLabel = { repasse_geral_nucleo: 'Geral → Núcleo', repasse_nucleo_projeto: 'Núcleo → Projeto' };
 
   document.getElementById('page-content').innerHTML = `
-    <div class="gs-card p-5">
+    <div class="gs-card p-5 mb-6">
       <div class="flex items-center justify-between mb-3">
         <h3 class="font-semibold text-gray-700">Repasses Pendentes de Aprovação/Execução</h3>
         <p class="text-xs text-gray-400 max-w-sm text-right">Repasses do Geral para um Núcleo só podem ser autorizados pelo Administrador.</p>
@@ -1395,7 +1406,54 @@ async function renderRepasses() {
           </tbody>
         </table>
       </div>` : '<p class="text-gray-400 text-sm">Nenhum repasse pendente.</p>'}
-    </div>`;
+    </div>
+
+    ${hasFinanceiroFullAccess() ? `
+    <div class="gs-card p-5">
+      <h3 class="font-semibold text-gray-700 mb-1">Conciliação — Histórico por Núcleo/Projeto</h3>
+      <p class="text-xs text-gray-400 mb-3">Consulte o histórico completo de repasses e saídas de cada núcleo/projeto, com acesso direto às notas fiscais e comprovantes (bancário, fiscal e de depósito) para conciliar com o repasse — sem precisar navegar pelos painéis de Núcleos/Projetos.</p>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div>
+          <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">Núcleos</h4>
+          <ul class="text-sm space-y-1">
+            ${nucleosData.data.map(n => `
+              <li class="flex items-center justify-between border-b last:border-0 py-1.5">
+                <span>${n.nome}</span>
+                <button onclick="abrirHistoricoFinanceiro('nucleo', ${n.id}, '${n.nome.replace(/'/g, "\\'")}')" class="text-brand-600 hover:underline text-xs font-medium"><i class="fas fa-file-invoice-dollar mr-1"></i>Ver / Conciliar</button>
+              </li>`).join('') || '<li class="text-gray-400">Nenhum núcleo cadastrado.</li>'}
+          </ul>
+        </div>
+        <div>
+          <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">Projetos</h4>
+          <ul class="text-sm space-y-1">
+            ${projetosData.data.map(p => `
+              <li class="flex items-center justify-between border-b last:border-0 py-1.5">
+                <span>${p.nome}</span>
+                <button onclick="abrirHistoricoFinanceiro('projeto', ${p.id}, '${p.nome.replace(/'/g, "\\'")}')" class="text-brand-600 hover:underline text-xs font-medium"><i class="fas fa-file-invoice-dollar mr-1"></i>Ver / Conciliar</button>
+              </li>`).join('') || '<li class="text-gray-400">Nenhum projeto cadastrado.</li>'}
+          </ul>
+        </div>
+      </div>
+    </div>` : ''}`;
+}
+
+// Modal de conciliação: mostra o histórico financeiro completo (repasses +
+// saídas) de um núcleo ou projeto específico, com acesso direto aos
+// comprovantes/notas fiscais — usado pelo Financeiro para conferir as saídas
+// contra o repasse sem precisar navegar pelos painéis de Núcleos/Projetos
+// (que ficam fora do menu desse papel).
+async function abrirHistoricoFinanceiro(tipo, id, nome) {
+  try {
+    const url = tipo === 'nucleo' ? `/api/financeiro/nucleo/${id}/lancamentos` : `/api/financeiro/projeto/${id}/lancamentos`;
+    const { data } = await axios.get(url);
+    openModal(`
+      <h3 class="text-lg font-bold text-gray-800 mb-1">Histórico Financeiro</h3>
+      <p class="text-sm text-gray-500 mb-4">${tipo === 'nucleo' ? 'Núcleo' : 'Projeto'}: <strong>${nome}</strong></p>
+      <div class="max-h-[65vh] overflow-y-auto">${renderLancamentosTable(data.data)}</div>
+      <div class="flex justify-end pt-4">
+        <button onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg">Fechar</button>
+      </div>`);
+  } catch (err) { toast(apiErr(err), 'error'); }
 }
 
 async function aprovarRepasse(id) {
