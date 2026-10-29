@@ -1008,7 +1008,7 @@ function renderLancamentosTable(lancamentos, opts = {}) {
         ${lancamentos.map(l => {
           const ehManual = l.tipo === 'entrada_manual' || l.tipo === 'saida_manual';
           const acoes = [];
-          if (l.status === 'executado') acoes.push(`<button onclick="verComprovantes(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Comprovantes</button>`);
+          if (l.status === 'executado' && hasFinanceiroFullAccess()) acoes.push(`<button onclick="verComprovantes(${l.id})" class="text-brand-600 hover:underline text-xs font-medium">Comprovantes</button>`);
           if (permitirEdicaoManual && ehManual && l.status === 'executado') {
             acoes.push(`<button onclick="editarLancamentoManual(${l.id})" class="text-amber-600 hover:underline text-xs font-medium">Editar</button>`);
             if (isAdmin()) acoes.push(`<button onclick="excluirLancamentoManual(${l.id})" class="text-red-600 hover:underline text-xs font-medium">Excluir</button>`);

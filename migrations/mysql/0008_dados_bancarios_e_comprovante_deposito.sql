@@ -33,8 +33,10 @@ ALTER TABLE users
 
 -- 2) Novo tipo de comprovante: 'deposito' (comprovante de depósito do
 --    repasse, anexado por financeiro/admin ao executar).
+--    OBS: "DROP CHECK" não é aceito pela sintaxe desta versão do
+--    MySQL/MariaDB — a forma correta é "DROP CONSTRAINT".
 ALTER TABLE comprovantes
-  DROP CHECK chk_comprovantes_tipo;
+  DROP CONSTRAINT chk_comprovantes_tipo;
 
 ALTER TABLE comprovantes
   ADD CONSTRAINT chk_comprovantes_tipo CHECK (tipo IN ('bancario','fiscal','deposito'));
