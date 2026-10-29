@@ -51,6 +51,24 @@ app.use('*', async (c, next) => {
   await next()
 })
 
+// Handler de erro global: evita que exceções não tratadas virem um 500
+// "Internal Server Error" sem detalhe nenhum. Sempre loga a stack completa
+// no stdout (visível via `pm2 logs`), e — apenas enquanto DEBUG_ERRORS=1
+// estiver definido no ambiente — também devolve a mensagem/stack na resposta
+// JSON, para diagnóstico temporário em produção sem expor isso por padrão.
+app.onError((err, c) => {
+  console.error('[erro-nao-tratado]', c.req.method, c.req.path, err)
+  const debug = process.env.DEBUG_ERRORS === '1'
+  return c.json(
+    {
+      ok: false,
+      error: 'Ocorreu um erro inesperado.',
+      ...(debug ? { debug_message: err.message, debug_stack: err.stack } : {})
+    },
+    500
+  )
+})
+
 // Job de limpeza: remove do R2 (após o processo Node.js persistente na
 // Hostinger subir) os comprovantes cujo prazo de retenção de 30 dias após
 // o primeiro download já expirou. Ver src/jobs/limpeza-comprovantes.ts.
