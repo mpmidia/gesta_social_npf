@@ -39,12 +39,25 @@ async function getNucleoIdFromProjeto(db: AppDatabase, projetoId: number): Promi
 async function uploadComprovanteFile(
   r2: AppBucket,
   lancamentoId: number,
-  tipo: 'bancario' | 'fiscal',
+  tipo: 'bancario' | 'fiscal' | 'deposito',
   file: File
 ): Promise<string> {
   const key = `comprovantes/${lancamentoId}/${tipo}/${generateRandomKey()}-${file.name}`
   await r2.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } })
   return key
+}
+
+// Retenção do comprovante de DEPÓSITO (repasse): diferente dos comprovantes de
+// saída (que expiram 30 dias após o primeiro download), o comprovante de
+// depósito pode ser visualizado livremente pelo coordenador do núcleo
+// destinatário e só expira 6 MESES após a execução do repasse — a contagem
+// começa na execução, não no download/visualização.
+const RETENCAO_DEPOSITO_MESES = 6
+
+function dataMaisMeses(meses: number): string {
+  const d = new Date()
+  d.setMonth(d.getMonth() + meses)
+  return d.toISOString().slice(0, 19).replace('T', ' ')
 }
 
 // ================= PAINEL GERAL =================
@@ -655,6 +668,30 @@ financeiro.post('/repasses/nucleo-projeto', requireRole('admin', 'coord_nucleo',
   return okResponse(c, { id, status: 'pendente' }, 201)
 })
 
+// Retorna os dados bancários/PIX do coordenador destinatário de um repasse —
+// usado pelo financeiro/admin na tela de execução, para saber para onde
+// depositar o valor antes de anexar o comprovante. Destinatário = o
+// coord_nucleo do núcleo envolvido no repasse (tanto para repasse
+// Geral->Núcleo quanto Núcleo->Projeto, o núcleo gestor é o mesmo).
+financeiro.get('/repasses/:id/destinatario', requireRole('admin', 'financeiro'), async (c) => {
+  const id = Number(c.req.param('id'))
+  const lancamento = await c.env.DB.prepare('SELECT nucleo_id FROM financeiro_lancamentos WHERE id = ?').bind(id).first<{ nucleo_id: number | null }>()
+  if (!lancamento || !lancamento.nucleo_id) return errorResponse(c, 404, 'Lançamento/núcleo não encontrado.')
+
+  const coordenador = await c.env.DB.prepare(
+    `SELECT u.nome, u.email, u.banco, u.agencia, u.conta, u.tipo_conta, u.pix_chave
+     FROM users u
+     JOIN user_roles ur ON ur.user_id = u.id
+     WHERE ur.role = 'coord_nucleo' AND ur.escopo_id = ? AND u.excluido_em IS NULL
+     LIMIT 1`
+  )
+    .bind(lancamento.nucleo_id)
+    .first()
+
+  if (!coordenador) return errorResponse(c, 404, 'Nenhum coordenador vinculado a este núcleo.')
+  return okResponse(c, coordenador)
+})
+
 // Aprovar repasse (admin, financeiro) — o Financeiro é quem recebe e processa
 // as solicitações de repasse/pagamento dos núcleos, tanto Geral->Núcleo quanto
 // Núcleo->Projeto.
@@ -705,14 +742,19 @@ financeiro.post('/repasses/:id/rejeitar', requireRole('admin', 'financeiro'), as
   return okResponse(c, { message: 'Repasse rejeitado.' })
 })
 
-// Executar repasse (admin, financeiro) — NÃO exige mais comprovante bancário.
-// Em vez disso, o sistema gera uma FATURA (financeiro_faturas), documento simples
-// e imprimível (ver GET /financeiro/faturas/:id), para ser enviada ao coordenador
-// do núcleo responsável como registro formal da transferência.
+// Executar repasse (admin, financeiro) — exige o anexo do COMPROVANTE DE
+// DEPÓSITO (arquivo) feito na conta bancária/PIX do coordenador destinatário.
+// Além do comprovante, o sistema continua gerando uma FATURA (financeiro_faturas),
+// documento simples e imprimível (ver GET /financeiro/faturas/:id), como registro
+// formal complementar da transferência (a fatura não substitui o comprovante).
+//
+// O comprovante de depósito usa uma política de retenção DIFERENTE da dos
+// comprovantes de saída: não expira ao ser baixado/visualizado pelo coordenador
+// (fica disponível para consulta), mas expira automaticamente 6 meses após a
+// execução — `expira_em` já é definido aqui, no momento da execução.
 financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), async (c) => {
   const actor = c.get('user')
   const id = Number(c.req.param('id'))
-  const body = await c.req.json<{ enviar_para?: string }>().catch(() => ({} as any))
 
   const lancamento = await c.env.DB.prepare('SELECT * FROM financeiro_lancamentos WHERE id = ?').bind(id).first<any>()
   if (!lancamento) return errorResponse(c, 404, 'Lançamento não encontrado.')
@@ -721,6 +763,16 @@ financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), as
   }
   if (lancamento.status !== 'aprovado') {
     return errorResponse(c, 409, 'O repasse precisa estar aprovado antes de ser executado.')
+  }
+
+  const formData = await c.req.formData().catch(() => null)
+  if (!formData) return errorResponse(c, 422, 'Envie os dados via multipart/form-data.')
+
+  const comprovanteDeposito = formData.get('comprovante_deposito')
+  const enviarPara = formData.get('enviar_para')?.toString() || ''
+
+  if (!isFormDataFile(comprovanteDeposito)) {
+    return errorResponse(c, 422, 'Anexe o comprovante de depósito para executar o repasse.')
   }
 
   const numero = `FAT-${id}-${generateRandomKey().slice(0, 6).toUpperCase()}`
@@ -740,16 +792,29 @@ financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), as
       lancamento.valor,
       lancamento.finalidade,
       actor.sub,
-      body.enviar_para ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
-      body.enviar_para || null
+      enviarPara ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
+      enviarPara || null
     )
   ])
 
+  // Upload do comprovante de depósito para R2 (fora da transação do DB, mas
+  // só chega aqui depois do lançamento já marcado como executado).
+  const depositoKey = await uploadComprovanteFile(c.env.R2, id, 'deposito', comprovanteDeposito)
+
+  // expira_em já é definido AGORA (execução), não no download/visualização —
+  // retenção de 6 meses independente de quando o coordenador vir o arquivo.
+  await c.env.DB.prepare(
+    `INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por, expira_em)
+     VALUES (?, 'deposito', ?, ?, ?, ?)`
+  )
+    .bind(id, depositoKey, comprovanteDeposito.name, actor.sub, dataMaisMeses(RETENCAO_DEPOSITO_MESES))
+    .run()
+
   const fatura = await c.env.DB.prepare('SELECT id FROM financeiro_faturas WHERE lancamento_id = ?').bind(id).first<{ id: number }>()
 
-  await logAudit(c, { userId: actor.sub, acao: 'financeiro.repasse.executar', entidade: 'financeiro_lancamentos', entidadeId: id, payload: { numero_fatura: numero } })
+  await logAudit(c, { userId: actor.sub, acao: 'financeiro.repasse.executar', entidade: 'financeiro_lancamentos', entidadeId: id, payload: { numero_fatura: numero, comprovante_deposito: true } })
 
-  return okResponse(c, { message: 'Repasse executado com sucesso. Fatura gerada.', fatura_id: fatura?.id, numero })
+  return okResponse(c, { message: 'Repasse executado com sucesso. Comprovante anexado e fatura gerada.', fatura_id: fatura?.id, numero })
 })
 
 // ================= FATURAS =================
@@ -834,6 +899,52 @@ financeiro.get('/lancamentos/:id/comprovantes', async (c) => {
 
   const { results } = await c.env.DB.prepare('SELECT * FROM comprovantes WHERE lancamento_id = ?').bind(id).all()
   return okResponse(c, results)
+})
+
+// Visualização (NÃO download) do comprovante de DEPÓSITO de um repasse, pelo
+// próprio coordenador do núcleo destinatário. Diferente de /comprovantes/:id/arquivo
+// (reservado a admin/financeiro, que dispara a janela de 30 dias de retenção),
+// esta rota: (1) só serve comprovantes tipo='deposito', (2) nunca marca
+// baixado_em/expirado por efeito da visualização — o arquivo some apenas quando
+// `expira_em` (6 meses após a execução, já gravado na execução) é atingido pelo
+// job de limpeza, (3) é restrita ao próprio escopo do núcleo do coord_nucleo.
+financeiro.get('/comprovantes/:id/visualizar', async (c) => {
+  const actor = c.get('user')
+  const id = Number(c.req.param('id'))
+  const comprovante = await c.env.DB.prepare('SELECT * FROM comprovantes WHERE id = ?').bind(id).first<any>()
+  if (!comprovante) return errorResponse(c, 404, 'Comprovante não encontrado.')
+  if (comprovante.tipo !== 'deposito') {
+    return errorResponse(c, 403, 'Esta rota só serve comprovantes de depósito de repasse.')
+  }
+
+  const lancamento = await c.env.DB.prepare('SELECT nucleo_id FROM financeiro_lancamentos WHERE id = ?')
+    .bind(comprovante.lancamento_id)
+    .first<{ nucleo_id: number | null }>()
+  if (!lancamento || !lancamento.nucleo_id) return errorResponse(c, 404, 'Lançamento associado não encontrado.')
+
+  const podeVer = isAdmin(actor) || isFinanceiro(actor) || getScopedNucleoIds(actor).includes(lancamento.nucleo_id)
+  if (!podeVer) return errorResponse(c, 403, 'Sem acesso a este comprovante.')
+
+  if (comprovante.expirado) {
+    return errorResponse(c, 410, 'Este comprovante expirou (6 meses após a execução do repasse) e foi removido do armazenamento.')
+  }
+
+  const object = await c.env.R2.get(comprovante.r2_key)
+  if (!object) return errorResponse(c, 404, 'Arquivo não encontrado no armazenamento.')
+
+  // Apenas registra que foi visualizado (auditoria), SEM disparar expiração —
+  // a expiração deste tipo de comprovante já foi fixada na execução do repasse.
+  if (!comprovante.visualizado_em) {
+    await c.env.DB.prepare('UPDATE comprovantes SET visualizado_em = CURRENT_TIMESTAMP WHERE id = ?').bind(id).run()
+  }
+
+  const nomeArquivo = comprovante.nome_arquivo || `comprovante-deposito-${id}`
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
+      'Content-Disposition': `inline; filename="${nomeArquivo.replace(/"/g, '')}"`
+    }
+  })
 })
 
 // Ciclo de vida do arquivo (ver migrations/mysql/0003_comprovantes_ciclo_de_vida.sql):

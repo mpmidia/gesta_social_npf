@@ -85,6 +85,143 @@ auth.get('/me', authMiddleware, async (c) => {
   return okResponse(c, user)
 })
 
+// ===== MEUS DADOS (qualquer usuário autenticado — consulta própria) =====
+// Retorna os dados completos do próprio usuário (nome, email, dados
+// bancários/PIX), usados para a tela de "Meu Perfil" (autosserviço).
+// Diferente de GET /me (que só devolve o payload do JWT), esta rota
+// consulta a tabela `users` para trazer os campos bancários também.
+auth.get('/me/perfil', authMiddleware, async (c) => {
+  const actor = c.get('user')
+  const row = await c.env.DB.prepare(
+    `SELECT id, nome, email, banco, agencia, conta, tipo_conta, pix_chave, created_at
+     FROM users WHERE id = ? AND excluido_em IS NULL`
+  )
+    .bind(actor.sub)
+    .first()
+  if (!row) return errorResponse(c, 404, 'Usuário não encontrado.')
+  return okResponse(c, row)
+})
+
+// ===== EDITAR MEUS DADOS (qualquer usuário autenticado) =====
+// Permite que o próprio usuário atualize nome, e-mail e dados
+// bancários/PIX (usados pelo financeiro para saber onde depositar um
+// repasse). NÃO permite alterar papel/escopo (role/nucleo_id) — isso
+// continua exclusivo do admin via PUT /usuarios/:id. Troca de senha
+// tem rota própria (POST /me/senha), que exige a senha atual.
+auth.put('/me', authMiddleware, async (c) => {
+  const actor = c.get('user')
+  const body = await c.req.json<{
+    nome?: string
+    email?: string
+    banco?: string | null
+    agencia?: string | null
+    conta?: string | null
+    tipo_conta?: string | null
+    pix_chave?: string | null
+  }>().catch(() => ({} as any))
+
+  const { nome, email, banco, agencia, conta, tipo_conta, pix_chave } = body
+
+  const target = await c.env.DB.prepare('SELECT id, nome FROM users WHERE id = ? AND excluido_em IS NULL')
+    .bind(actor.sub)
+    .first<{ id: number; nome: string }>()
+  if (!target) return errorResponse(c, 404, 'Usuário não encontrado.')
+
+  if (nome !== undefined && !nome.trim()) {
+    return errorResponse(c, 422, 'Nome não pode ser vazio.')
+  }
+
+  if (email !== undefined) {
+    if (!email.trim()) return errorResponse(c, 422, 'E-mail não pode ser vazio.')
+    const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ? AND id != ? AND excluido_em IS NULL')
+      .bind(email.toLowerCase().trim(), actor.sub)
+      .first()
+    if (existing) return errorResponse(c, 409, 'Já existe outro usuário com este e-mail.')
+  }
+
+  const validTiposConta = ['corrente', 'poupanca', null, undefined]
+  if (tipo_conta !== undefined && tipo_conta !== null && !['corrente', 'poupanca'].includes(tipo_conta)) {
+    return errorResponse(c, 422, "tipo_conta deve ser 'corrente' ou 'poupanca'.")
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE users SET
+       nome = COALESCE(?, nome),
+       email = COALESCE(?, email),
+       banco = ?,
+       agencia = ?,
+       conta = ?,
+       tipo_conta = ?,
+       pix_chave = ?
+     WHERE id = ?`
+  )
+    .bind(
+      nome?.trim() ?? null,
+      email ? email.toLowerCase().trim() : null,
+      banco !== undefined ? (banco?.trim() || null) : null,
+      agencia !== undefined ? (agencia?.trim() || null) : null,
+      conta !== undefined ? (conta?.trim() || null) : null,
+      tipo_conta !== undefined ? (tipo_conta || null) : null,
+      pix_chave !== undefined ? (pix_chave?.trim() || null) : null,
+      actor.sub
+    )
+    .run()
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'auth.me.editar',
+    entidade: 'users',
+    entidadeId: actor.sub,
+    payload: { nome, email, banco, agencia, conta, tipo_conta, pix_chave_informada: !!pix_chave }
+  })
+
+  const atualizado = await c.env.DB.prepare(
+    `SELECT id, nome, email, banco, agencia, conta, tipo_conta, pix_chave FROM users WHERE id = ?`
+  )
+    .bind(actor.sub)
+    .first()
+
+  return okResponse(c, atualizado)
+})
+
+// ===== TROCAR MINHA SENHA (qualquer usuário autenticado) =====
+// Diferente do reset feito pelo admin (que não exige a senha atual),
+// aqui o próprio usuário precisa confirmar a senha atual antes de
+// definir uma nova — ação sensível sempre auditada.
+auth.post('/me/senha', authMiddleware, async (c) => {
+  const actor = c.get('user')
+  const body = await c.req.json<{ senha_atual?: string; nova_senha?: string }>().catch(() => ({} as any))
+  const { senha_atual, nova_senha } = body
+
+  if (!senha_atual || !nova_senha) {
+    return errorResponse(c, 422, 'Informe a senha atual e a nova senha.')
+  }
+  if (nova_senha.length < 6) {
+    return errorResponse(c, 422, 'A nova senha deve ter ao menos 6 caracteres.')
+  }
+
+  const target = await c.env.DB.prepare('SELECT id, senha_hash FROM users WHERE id = ? AND excluido_em IS NULL')
+    .bind(actor.sub)
+    .first<{ id: number; senha_hash: string }>()
+  if (!target) return errorResponse(c, 404, 'Usuário não encontrado.')
+
+  const senhaOk = await verifyPassword(senha_atual, target.senha_hash)
+  if (!senhaOk) return errorResponse(c, 401, 'Senha atual incorreta.')
+
+  const novoHash = await hashPassword(nova_senha)
+  await c.env.DB.prepare('UPDATE users SET senha_hash = ? WHERE id = ?').bind(novoHash, actor.sub).run()
+
+  await logAudit(c, {
+    userId: actor.sub,
+    acao: 'auth.me.trocar_senha',
+    entidade: 'users',
+    entidadeId: actor.sub
+    // Nunca gravar a senha (nem hash) no payload de auditoria.
+  })
+
+  return okResponse(c, { message: 'Senha alterada com sucesso.' })
+})
+
 // ===== LISTAR USUÁRIOS (somente admin) =====
 // Usuários & Permissões é uma tela EXCLUSIVA do Administrador — nenhum outro
 // papel enxerga ou gerencia outros usuários (nem Coordenador Geral).

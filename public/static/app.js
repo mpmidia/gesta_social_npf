@@ -124,6 +124,12 @@ function buildNav() {
     items.push({ href: '#/comunicacao', icon: 'fa-bullhorn', label: 'Comunicação' });
   }
 
+  // Meu Perfil: disponível para QUALQUER usuário autenticado — consultar e
+  // editar os próprios dados (nome, e-mail, dados bancários/PIX) e trocar a
+  // senha de acesso. Especialmente importante para o coordenador de núcleo,
+  // que precisa cadastrar onde o repasse deve ser depositado.
+  items.push({ href: '#/meu-perfil', icon: 'fa-user-gear', label: 'Meu Perfil' });
+
   nav.innerHTML = items.map(i => `
     <a href="${i.href}" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg transition text-[13.5px]" data-href="${i.href}">
       <i class="fas ${i.icon} w-4 text-center"></i> <span>${i.label}</span>
@@ -155,7 +161,8 @@ const routes = [
   { pattern: /^#\/financeiro-geral$/, handler: renderFinanceiroGeral, title: 'Financeiro Geral' },
   { pattern: /^#\/repasses$/, handler: renderRepasses, title: 'Repasses Pendentes' },
   { pattern: /^#\/usuarios$/, handler: renderUsuarios, title: 'Usuários & Permissões' },
-  { pattern: /^#\/comunicacao$/, handler: renderComunicacao, title: 'Comunicação' }
+  { pattern: /^#\/comunicacao$/, handler: renderComunicacao, title: 'Comunicação' },
+  { pattern: /^#\/meu-perfil$/, handler: renderMeuPerfil, title: 'Meu Perfil' }
 ];
 
 async function router() {
@@ -462,7 +469,12 @@ async function renderNucleoDetalhe(id) {
     saldoHtml = `<p class="text-2xl font-bold text-emerald-600">${fmtMoney(saldoData.data.saldo)}</p>`;
   } catch { saldoHtml = '<p class="text-gray-400 text-sm">Sem acesso ao saldo</p>'; }
 
+  // canManage: controla ações de escopo (ex: criar projeto) — coord_nucleo
+  // TEM acesso ao próprio núcleo para isso. NÃO usar para editar/excluir o núcleo.
   const canManage = isGlobal() || scopedNucleoIds().includes(Number(id));
+  // canEditNucleo: somente quem pode editar/excluir os dados do núcleo
+  // (nome, descrição, etc). coord_nucleo pode VER mas NÃO EDITAR o núcleo.
+  const canEditNucleo = isGlobal();
   // Gestão de coordenadores do núcleo: Admin e Coordenador Geral (não o próprio
   // coord_nucleo, que não pode se auto-gerenciar).
   const canManageCoordenadores = isGlobal();
@@ -480,10 +492,10 @@ async function renderNucleoDetalhe(id) {
             <p class="text-gray-500 text-sm mb-3">${n.descricao || ''}</p>
             <p class="text-xs text-gray-400"><i class="fas fa-link mr-1"></i> <a href="/n/${n.slug_publico}" target="_blank" class="text-brand-600 hover:underline font-medium">/n/${n.slug_publico}</a></p>
           </div>
-          ${canManage && !n.arquivado_em ? `
+          ${canEditNucleo && !n.arquivado_em ? `
           <div class="flex gap-2 shrink-0">
             <button onclick="openEditNucleoModal(${id})" class="text-xs text-gray-600 hover:text-brand-600 border border-gray-300 rounded-lg px-3 py-1.5"><i class="fas fa-pen mr-1"></i>Editar</button>
-            ${isGlobal() ? `<button onclick="excluirOuArquivarNucleo(${id})" class="text-xs text-red-600 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5"><i class="fas fa-trash mr-1"></i>Excluir/Arquivar</button>` : ''}
+            <button onclick="excluirOuArquivarNucleo(${id})" class="text-xs text-red-600 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5"><i class="fas fa-trash mr-1"></i>Excluir/Arquivar</button>
           </div>` : ''}
         </div>
       </div>
@@ -929,7 +941,7 @@ async function renderProjetoDetalhe(id) {
     e.preventDefault();
     const formData = new FormData(e.target);
     try {
-      await axios.post(`/api/financeiro/projeto/${id}/saidas`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      await axios.post(`/api/financeiro/projeto/${id}/saidas`, formData);
       toast('Saída de pagamento lançada com sucesso.');
       renderProjetoDetalhe(id);
     } catch (err) { toast(apiErr(err), 'error'); }
@@ -964,7 +976,7 @@ function openUploadGaleriaModal(projetoId) {
     e.preventDefault();
     const formData = new FormData(e.target);
     try {
-      await axios.post(`/api/projetos/${projetoId}/galeria`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      await axios.post(`/api/projetos/${projetoId}/galeria`, formData);
       closeModal();
       toast('Imagem enviada.');
       renderProjetoDetalhe(projetoId);
@@ -1050,25 +1062,32 @@ async function verComprovantes(lancamentoId) {
     const podeBaixarEArquivar = isAdmin() || isFinanceiro();
     openModal(`
       <h3 class="text-lg font-bold text-gray-800 mb-4">Comprovantes</h3>
-      <p class="text-xs text-gray-500 mb-3">Anexado pelo Coordenador do Núcleo e disponibilizado ao Administrador/Financeiro para download. O arquivo fica disponível até o primeiro download; depois disso é removido do armazenamento em 30 dias. O registro do comprovante é mantido para fins de auditoria.</p>
+      <p class="text-xs text-gray-500 mb-3">Comprovantes de saída: anexados pelo Coordenador do Núcleo, disponibilizados ao Administrador/Financeiro para download (removidos do armazenamento 30 dias após o primeiro download). Comprovantes de depósito (repasse): podem ser visualizados livremente pelo coordenador destinatário e expiram automaticamente 6 meses após a execução do repasse.</p>
       <ul class="space-y-2">
-        ${comprovantes.map(cp => `
+        ${comprovantes.map(cp => {
+          const isDeposito = cp.tipo === 'deposito';
+          return `
           <li class="flex items-center justify-between border rounded-lg px-3 py-2 gap-3">
             <div class="min-w-0">
               <span class="text-sm block truncate"><i class="fas fa-file-invoice mr-1 text-gray-400"></i> ${cp.tipo} — ${cp.nome_arquivo || 'arquivo'}</span>
               ${comprovanteStatusLabel(cp)}
             </div>
             <span class="shrink-0 flex items-center gap-2">
-              ${!podeBaixarEArquivar ? '<span class="text-xs text-gray-400 italic whitespace-nowrap">Apenas Admin/Financeiro baixam</span>' : ''}
-              ${podeBaixarEArquivar && !cp.expirado && !cp.arquivado_em
+              ${isDeposito && !cp.expirado
+                ? `<a href="/api/financeiro/comprovantes/${cp.id}/visualizar" target="_blank" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 text-xs font-medium whitespace-nowrap"><i class="fas fa-eye"></i> Visualizar</a>`
+                : ''}
+              ${isDeposito && cp.expirado ? '<span class="text-xs text-gray-400 font-medium whitespace-nowrap">Expirado (6 meses)</span>' : ''}
+              ${!isDeposito && !podeBaixarEArquivar ? '<span class="text-xs text-gray-400 italic whitespace-nowrap">Apenas Admin/Financeiro baixam</span>' : ''}
+              ${!isDeposito && podeBaixarEArquivar && !cp.expirado && !cp.arquivado_em
                 ? `<a href="/api/financeiro/comprovantes/${cp.id}/arquivo" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 text-xs font-medium whitespace-nowrap"><i class="fas fa-download"></i> Baixar</a>`
                 : ''}
-              ${podeBaixarEArquivar && !cp.arquivado_em
+              ${!isDeposito && podeBaixarEArquivar && !cp.arquivado_em
                 ? `<button onclick="arquivarComprovante(${cp.id}, ${lancamentoId})" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 text-xs font-medium whitespace-nowrap"><i class="fas fa-box-archive"></i> Arquivar</button>`
                 : ''}
-              ${(cp.expirado || cp.arquivado_em) && !podeBaixarEArquivar ? '<span class="text-xs text-gray-400 font-medium whitespace-nowrap">Indisponível</span>' : ''}
+              ${!isDeposito && (cp.expirado || cp.arquivado_em) && !podeBaixarEArquivar ? '<span class="text-xs text-gray-400 font-medium whitespace-nowrap">Indisponível</span>' : ''}
             </span>
-          </li>`).join('') || '<li class="text-gray-400 text-sm">Nenhum comprovante.</li>'}
+          </li>`;
+        }).join('') || '<li class="text-gray-400 text-sm">Nenhum comprovante.</li>'}
       </ul>
       <div class="flex justify-end pt-4"><button onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Fechar</button></div>`);
   } catch (err) { toast(apiErr(err), 'error'); }
@@ -1398,35 +1417,54 @@ async function rejeitarRepasse(id) {
 }
 
 function openExecutarRepasseModal(id) {
-  openModal(`
-    <h3 class="text-lg font-bold text-gray-800 mb-4">Executar Repasse</h3>
-    <p class="text-sm text-gray-600 mb-3">Não é mais necessário anexar comprovante bancário. Ao executar, o sistema gera automaticamente uma <strong>fatura</strong> para ser enviada ao coordenador do núcleo responsável.</p>
-    <form id="form-executar" class="space-y-3">
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">E-mail para envio da fatura (opcional)</label>
-        <input type="email" name="enviar_para" placeholder="coordenador@email.com" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
-      </div>
-      <div class="flex justify-end gap-2 pt-2">
-        <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
-        <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-file-invoice mr-1"></i>Executar e gerar fatura</button>
-      </div>
-    </form>`);
+  // Busca os dados bancários/PIX do destinatário, para o financeiro/admin
+  // saber para onde depositar antes de executar.
+  axios.get(`/api/financeiro/repasses/${id}/destinatario`).catch(() => null).then((res) => {
+    const dest = res?.data?.data || null;
+    const dadosBancariosHtml = dest ? `
+      <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-3 text-xs text-gray-700 space-y-0.5">
+        <p class="font-semibold text-gray-600 mb-1"><i class="fas fa-landmark mr-1"></i> Dados para depósito (${dest.nome}):</p>
+        ${dest.banco ? `<p>Banco: <strong>${dest.banco}</strong>${dest.tipo_conta ? ' · ' + (dest.tipo_conta === 'corrente' ? 'Conta Corrente' : 'Poupança') : ''}</p>` : ''}
+        ${dest.agencia || dest.conta ? `<p>Agência: <strong>${dest.agencia || '-'}</strong> · Conta: <strong>${dest.conta || '-'}</strong></p>` : ''}
+        ${dest.pix_chave ? `<p>Chave PIX: <strong>${dest.pix_chave}</strong></p>` : ''}
+        ${!dest.banco && !dest.pix_chave ? '<p class="text-amber-600"><i class="fas fa-triangle-exclamation mr-1"></i>Coordenador ainda não cadastrou dados bancários/PIX em "Meu Perfil".</p>' : ''}
+      </div>` : '';
 
-  document.getElementById('form-executar').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const body = Object.fromEntries(new FormData(e.target).entries());
-    try {
-      const { data } = await axios.post(`/api/financeiro/repasses/${id}/executar`, body);
-      closeModal();
-      const faturaId = data.data.fatura_id;
-      openModal(`
-        <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-circle-check text-emerald-500 mr-1"></i>Repasse executado</h3>
-        <p class="text-sm text-gray-600 mb-4">Fatura <strong>${data.data.numero}</strong> gerada com sucesso.</p>
-        <div class="flex justify-end gap-2">
-          ${faturaId ? `<a href="/api/financeiro/faturas/${faturaId}" target="_blank" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-eye mr-1"></i>Ver / Imprimir Fatura</a>` : ''}
-          <button onclick="closeModal(); renderRepasses();" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg">Fechar</button>
-        </div>`);
-    } catch (err) { toast(apiErr(err), 'error'); }
+    openModal(`
+      <h3 class="text-lg font-bold text-gray-800 mb-4">Executar Repasse</h3>
+      ${dadosBancariosHtml}
+      <p class="text-sm text-gray-600 mb-3">Anexe o <strong>comprovante de depósito</strong> feito na conta/PIX acima. O sistema também gera automaticamente uma <strong>fatura</strong> para registro.</p>
+      <form id="form-executar" enctype="multipart/form-data" class="space-y-3">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">Comprovante de depósito (obrigatório)</label>
+          <input type="file" name="comprovante_deposito" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">E-mail para envio da fatura (opcional)</label>
+          <input type="email" name="enviar_para" placeholder="coordenador@email.com" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-gray-600">Cancelar</button>
+          <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-file-invoice mr-1"></i>Executar e anexar comprovante</button>
+        </div>
+      </form>`);
+
+    document.getElementById('form-executar').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      try {
+        const { data } = await axios.post(`/api/financeiro/repasses/${id}/executar`, formData);
+        closeModal();
+        const faturaId = data.data.fatura_id;
+        openModal(`
+          <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-circle-check text-emerald-500 mr-1"></i>Repasse executado</h3>
+          <p class="text-sm text-gray-600 mb-4">Comprovante de depósito anexado. Fatura <strong>${data.data.numero}</strong> gerada com sucesso.</p>
+          <div class="flex justify-end gap-2">
+            ${faturaId ? `<a href="/api/financeiro/faturas/${faturaId}" target="_blank" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition"><i class="fas fa-eye mr-1"></i>Ver / Imprimir Fatura</a>` : ''}
+            <button onclick="closeModal(); renderRepasses();" class="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg">Fechar</button>
+          </div>`);
+      } catch (err) { toast(apiErr(err), 'error'); }
+    });
   });
 }
 
@@ -1792,6 +1830,105 @@ async function excluirUsuario(id) {
     toast(data.data.message);
     renderUsuarios();
   } catch (err) { toast(apiErr(err), 'error'); }
+}
+
+// ============================================================
+// MEU PERFIL (autosserviço — consultar/editar dados próprios e senha)
+// ============================================================
+
+async function renderMeuPerfil() {
+  const { data } = await axios.get('/api/auth/me/perfil');
+  const p = data.data;
+
+  document.getElementById('page-content').innerHTML = `
+    <div class="max-w-2xl mx-auto space-y-6">
+      <div class="gs-card p-5">
+        <h3 class="font-semibold text-gray-700 mb-1"><i class="fas fa-id-card mr-1"></i> Meus Dados</h3>
+        <p class="text-xs text-gray-400 mb-4">Atualize seu nome, e-mail e dados bancários/PIX. Os dados bancários/PIX são usados pelo financeiro para saber para onde depositar um repasse aprovado.</p>
+        <form id="form-meu-perfil" class="space-y-3">
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">Nome</label>
+            <input name="nome" value="${(p.nome || '').replace(/"/g, '&quot;')}" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">E-mail</label>
+            <input name="email" type="email" value="${(p.email || '').replace(/"/g, '&quot;')}" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+          </div>
+          <hr class="my-2" />
+          <p class="text-xs font-semibold text-gray-500"><i class="fas fa-landmark mr-1"></i> Dados de depósito</p>
+          <div class="grid sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Banco</label>
+              <input name="banco" value="${(p.banco || '').replace(/"/g, '&quot;')}" placeholder="Ex: Banco do Brasil" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Tipo de conta</label>
+              <select name="tipo_conta" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition">
+                <option value="">Selecione...</option>
+                <option value="corrente" ${p.tipo_conta === 'corrente' ? 'selected' : ''}>Corrente</option>
+                <option value="poupanca" ${p.tipo_conta === 'poupanca' ? 'selected' : ''}>Poupança</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Agência</label>
+              <input name="agencia" value="${(p.agencia || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Conta</label>
+              <input name="conta" value="${(p.conta || '').replace(/"/g, '&quot;')}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">Chave PIX</label>
+            <input name="pix_chave" value="${(p.pix_chave || '').replace(/"/g, '&quot;')}" placeholder="CPF/CNPJ, e-mail, telefone ou chave aleatória" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+          </div>
+          <div class="flex justify-end pt-2">
+            <button type="submit" class="brand-gradient hover:opacity-90 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Salvar dados</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="gs-card p-5">
+        <h3 class="font-semibold text-gray-700 mb-1"><i class="fas fa-key mr-1"></i> Trocar Senha</h3>
+        <p class="text-xs text-gray-400 mb-4">Por segurança, informe sua senha atual para definir uma nova.</p>
+        <form id="form-trocar-senha" class="space-y-3">
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">Senha atual</label>
+            <input name="senha_atual" type="password" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">Nova senha</label>
+            <input name="nova_senha" type="password" minlength="6" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none transition" />
+          </div>
+          <div class="flex justify-end pt-2">
+            <button type="submit" class="bg-gray-800 hover:bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-soft transition">Alterar senha</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+
+  document.getElementById('form-meu-perfil').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      await axios.put('/api/auth/me', body);
+      toast('Dados atualizados com sucesso.');
+      const initials = body.nome.trim().split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+      CURRENT_USER.nome = body.nome;
+      document.getElementById('user-avatar').textContent = initials || '?';
+      document.getElementById('user-info').innerHTML = `<span class="block text-white font-medium truncate max-w-[9.5rem]">${CURRENT_USER.nome}</span><span class="block text-[11px] text-gray-500 truncate max-w-[9.5rem]">${CURRENT_USER.roles.map(r => ROLE_LABELS[r.role]).join(', ')}</span>`;
+    } catch (err) { toast(apiErr(err), 'error'); }
+  });
+
+  document.getElementById('form-trocar-senha').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      await axios.post('/api/auth/me/senha', body);
+      toast('Senha alterada com sucesso.');
+      e.target.reset();
+    } catch (err) { toast(apiErr(err), 'error'); }
+  });
 }
 
 // ============================================================
