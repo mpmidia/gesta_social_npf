@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>debug intercept2</title>
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
+</head>
+<body>
+<iframe id="frame" src="about:blank" style="width:100%;height:600px;border:1px solid red;"></iframe>
+<script>
+async function run() {
+  try {
+    axios.defaults.withCredentials = true;
+    await axios.post('/api/auth/login', { email: 'debug.temp.coord2@teste-interno.local', senha: 'DebugTemp2_8wQ!z3' });
+    console.log('login OK');
+    const frame = document.getElementById('frame');
+    frame.onload = () => {
+      try {
+        const win = frame.contentWindow;
+        // Intercepta a camada axios DENTRO do iframe, para ver o erro real
+        // de qualquer requisicao que falhar, antes do catch generico do router engolir.
+        win.axios.interceptors.response.use(
+          (resp) => resp,
+          (error) => {
+            console.log('[IFRAME axios error]', 'url=', error.config ? error.config.url : '?', 'status=', error.response ? error.response.status : 'sem resposta', 'data=', error.response ? JSON.stringify(error.response.data) : error.message);
+            return Promise.reject(error);
+          }
+        );
+        setTimeout(() => {
+          win.location.hash = '#/nucleos/2';
+          setTimeout(() => {
+            const doc = frame.contentDocument;
+            const content = doc.getElementById('page-content');
+            console.log('PAGE CONTENT APOS HASH:', content ? content.innerHTML.slice(0,500) : 'nao achou');
+          }, 2500);
+        }, 1000);
+      } catch (e) {
+        console.error('ERRO SETUP IFRAME:', e.message);
+      }
+    };
+    frame.src = '/dashboard';
+  } catch (err) {
+    console.error('ERRO LOGIN:', err.message);
+  }
+}
+run();
+</script>
+</body>
+</html>
