@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>debug real flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
+</head>
+<body>
+<div id="app">carregando...</div>
+<script>
+async function run() {
+  try {
+    axios.defaults.withCredentials = true;
+    console.log('=== login ===');
+    await axios.post('/api/auth/login', { email: 'debug.temp.coord2@teste-interno.local', senha: 'DebugTemp2_8wQ!z3' });
+    console.log('login OK, redirecionando pro dashboard real...');
+    window.location.href = '/dashboard';
+  } catch (err) {
+    console.error('ERRO:', err.message);
+  }
+}
+run();
+</script>
+</body>
+</html>
