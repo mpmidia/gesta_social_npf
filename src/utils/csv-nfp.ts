@@ -74,6 +74,34 @@ function parseLinha(linha: string, delimitador: string): string[] {
   return campos.map((c) => c.trim())
 }
 
+/**
+ * Decodifica o conteúdo bruto do arquivo tentando primeiro UTF-8 (com
+ * detecção de erro) e, se inválido/incoerente, caindo para Windows-1252
+ * (equivalente a ISO-8859-1 nos bytes acentuados comuns em PT-BR) — o
+ * encoding mais comum em exportações de sites de governo brasileiros,
+ * incluindo o site da Nota Fiscal Paulista. Sem isso, letras acentuadas
+ * (ã, ç, é...) viram caracteres de substituição (�) ao ler como UTF-8,
+ * quebrando a normalização de cabeçalhos como "Data Emissão" → dataemissao
+ * e fazendo o arquivo ser rejeitado como "não reconhecido".
+ */
+export function decodificarConteudoNFP(bytes: ArrayBuffer): string {
+  // 'fatal: true' faz o decoder lançar exceção em vez de silenciosamente
+  // inserir U+FFFD (replacement character) quando os bytes não formam
+  // UTF-8 válido — é assim que detectamos que o arquivo não é UTF-8.
+  try {
+    const utf8Decoder = new TextDecoder('utf-8', { fatal: true })
+    const texto = utf8Decoder.decode(bytes)
+    // Alguns arquivos são UTF-8 válido mas na verdade são Windows-1252
+    // "por coincidência" (bytes que também formam sequências UTF-8 válidas,
+    // raro, mas o replacement character U+FFFD indica reencode incorreto
+    // caso já tenha ocorrido antes — defesa extra).
+    if (!texto.includes('\uFFFD')) return texto
+  } catch {
+    // Não é UTF-8 válido — cai para Windows-1252 abaixo.
+  }
+  return new TextDecoder('windows-1252').decode(bytes)
+}
+
 function normalizarCabecalho(h: string): string {
   return h
     .normalize('NFD')

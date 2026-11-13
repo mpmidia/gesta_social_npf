@@ -4,7 +4,7 @@ import type { AppDatabase } from '../../platform/db'
 import type { AppBucket } from '../../platform/storage'
 import { errorResponse, okResponse, isFormDataFile } from '../../utils/response'
 import { generateRandomKey } from '../../utils/crypto'
-import { parseCreditosNFP } from '../../utils/csv-nfp'
+import { parseCreditosNFP, decodificarConteudoNFP } from '../../utils/csv-nfp'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
 import { requireRole, getScopedNucleoIds, isAdmin, isFinanceiro, hasFinanceiroFullAccess } from '../../middlewares/rbac'
@@ -103,7 +103,13 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async
     )
   }
 
-  const conteudo = await arquivo.text()
+  // Não usar arquivo.text() diretamente: ele assume UTF-8 e substitui bytes
+  // inválidos por "�" silenciosamente. O site da NFP costuma exportar em
+  // Windows-1252/ISO-8859-1, o que corromperia justamente os cabeçalhos
+  // acentuados ("Data Emissão", "Créditos", "Situação do Crédito"),
+  // fazendo o arquivo ser rejeitado como formato não reconhecido.
+  const bytesArquivo = await arquivo.arrayBuffer()
+  const conteudo = decodificarConteudoNFP(bytesArquivo)
   const resultado = await parseCreditosNFP(conteudo)
 
   if (resultado.erroFormato) {
