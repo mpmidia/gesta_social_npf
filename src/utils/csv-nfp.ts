@@ -83,23 +83,54 @@ function parseLinha(linha: string, delimitador: string): string[] {
  * (ã, ç, é...) viram caracteres de substituição (�) ao ler como UTF-8,
  * quebrando a normalização de cabeçalhos como "Data Emissão" → dataemissao
  * e fazendo o arquivo ser rejeitado como "não reconhecido".
+ *
+ * Também remove um BOM (Byte Order Mark) UTF-8 (bytes 0xEF,0xBB,0xBF) caso
+ * presente no início do arquivo — isso é feito ANTES de qualquer decodificação,
+ * diretamente nos bytes brutos. Isso é essencial porque alguns arquivos
+ * exportados têm BOM mas, em outro trecho, contêm bytes acentuados em
+ * Windows-1252 que não formam UTF-8 válido; nesse caso o decoder UTF-8
+ * falha (exceção) e o código cairia no decoder Windows-1252, que NÃO
+ * reconhece o BOM como marcador especial e o decodificaria como os
+ * caracteres de lixo "ï»¿" colados no início do primeiro campo do
+ * cabeçalho (ex.: "CNPJ emit." viraria "ï»¿CNPJ emit." → normalizado
+ * incorretamente para "icnpjemit", fazendo a coluna "cnpjemit" não ser
+ * encontrada). Removendo o BOM a nível de bytes antes de decodificar,
+ * nenhum dos dois decoders chega a vê-lo.
  */
-export function decodificarConteudoNFP(bytes: ArrayBuffer): string {
+export function decodificarConteudoNFP(bytesEntrada: ArrayBuffer): string {
+  let bytes = bytesEntrada
+  const prefixo = new Uint8Array(bytesEntrada, 0, Math.min(3, bytesEntrada.byteLength))
+  if (prefixo.length === 3 && prefixo[0] === 0xef && prefixo[1] === 0xbb && prefixo[2] === 0xbf) {
+    bytes = bytesEntrada.slice(3)
+  }
+
   // 'fatal: true' faz o decoder lançar exceção em vez de silenciosamente
   // inserir U+FFFD (replacement character) quando os bytes não formam
   // UTF-8 válido — é assim que detectamos que o arquivo não é UTF-8.
+  let texto: string
   try {
     const utf8Decoder = new TextDecoder('utf-8', { fatal: true })
-    const texto = utf8Decoder.decode(bytes)
+    texto = utf8Decoder.decode(bytes)
     // Alguns arquivos são UTF-8 válido mas na verdade são Windows-1252
     // "por coincidência" (bytes que também formam sequências UTF-8 válidas,
     // raro, mas o replacement character U+FFFD indica reencode incorreto
     // caso já tenha ocorrido antes — defesa extra).
-    if (!texto.includes('\uFFFD')) return texto
+    if (texto.includes('\uFFFD')) {
+      texto = new TextDecoder('windows-1252').decode(bytes)
+    }
   } catch {
-    // Não é UTF-8 válido — cai para Windows-1252 abaixo.
+    // Não é UTF-8 válido — cai para Windows-1252.
+    texto = new TextDecoder('windows-1252').decode(bytes)
   }
-  return new TextDecoder('windows-1252').decode(bytes)
+
+  // Defesa extra: remove um BOM remanescente como caractere (\uFEFF) caso,
+  // por qualquer motivo (ex.: BOM duplicado, ou decoder deixando passar),
+  // ele ainda esteja presente no início do texto decodificado.
+  if (texto.charCodeAt(0) === 0xfeff) {
+    texto = texto.slice(1)
+  }
+
+  return texto
 }
 
 function normalizarCabecalho(h: string): string {
