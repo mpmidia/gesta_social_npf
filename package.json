@@ -1,7 +1,7 @@
 {
   "name": "webapp",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"try{require('fs').writeFileSync('dist/build-commit.txt',(require('child_process').execSync('git rev-parse HEAD').toString().trim())+' '+new Date().toISOString())}catch(e){require('fs').writeFileSync('dist/build-commit.txt','desconhecido')}\"",
     "start": "node dist/index.js",
     "dev": "tsc --watch & node --watch dist/index.js",
     "clean-port": "fuser -k 3000/tcp 2>/dev/null || true",

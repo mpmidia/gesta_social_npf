@@ -2,6 +2,8 @@ import 'dotenv/config'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono } from 'hono'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { AppEnv } from './types/bindings'
 import { getDatabase } from './platform/db'
 import { getStorage } from './platform/storage'
@@ -75,6 +77,28 @@ app.onError((err, c) => {
 agendarLimpezaComprovantes(db, r2)
 
 app.use('/static/*', serveStatic({ root: './public' }))
+
+// Endpoint de diagnóstico TEMPORÁRIO (sem autenticação, só leitura de
+// metadados de build) — usado para confirmar se o processo Node.js em
+// produção na Hostinger está de fato rodando o código do último commit
+// enviado ao GitHub, já que o auto-deploy pode não estar reiniciando o
+// processo / rebuildando automaticamente a cada push. Remover depois de
+// confirmado. O arquivo dist/build-commit.txt é gravado pelo próprio
+// `npm run build` (ver package.json) com o hash do commit no momento do
+// build — não depende de nenhuma variável de ambiente configurada à parte.
+app.get('/api/_diag/versao', (c) => {
+  let buildInfo = 'build-commit.txt não encontrado (build antigo, antes desta instrumentação)'
+  try {
+    buildInfo = readFileSync(join(process.cwd(), 'dist', 'build-commit.txt'), 'utf-8').trim()
+  } catch {
+    // mantém o valor padrão acima
+  }
+  return c.json({
+    build: buildInfo,
+    nodeVersion: process.version,
+    horaServidor: new Date().toISOString()
+  })
+})
 
 app.route('/api/auth', authRoutes)
 app.route('/api/nucleos', nucleosRoutes)
