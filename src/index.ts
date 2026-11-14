@@ -78,14 +78,12 @@ agendarLimpezaComprovantes(db, r2)
 
 app.use('/static/*', serveStatic({ root: './public' }))
 
-// Endpoint de diagnóstico TEMPORÁRIO (sem autenticação, só leitura de
-// metadados de build) — usado para confirmar se o processo Node.js em
-// produção na Hostinger está de fato rodando o código do último commit
-// enviado ao GitHub, já que o auto-deploy pode não estar reiniciando o
-// processo / rebuildando automaticamente a cada push. Remover depois de
-// confirmado. O arquivo dist/build-commit.txt é gravado pelo próprio
+// Endpoint de diagnóstico (sem autenticação, só leitura de metadados de
+// build) — usado para confirmar qual commit está rodando em produção a
+// cada deploy. O arquivo dist/build-commit.txt é gravado pelo próprio
 // `npm run build` (ver package.json) com o hash do commit no momento do
-// build — não depende de nenhuma variável de ambiente configurada à parte.
+// build. Mantido (não é código de debug temporário): útil para qualquer
+// diagnóstico futuro de "o deploy aplicou mesmo as últimas mudanças?".
 app.get('/api/_diag/versao', (c) => {
   let buildInfo = 'build-commit.txt não encontrado (build antigo, antes desta instrumentação)'
   try {
