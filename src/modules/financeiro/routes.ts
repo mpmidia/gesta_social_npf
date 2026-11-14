@@ -118,10 +118,24 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async
 
   // Guarda o arquivo original no R2 para permitir "baixar a planilha" depois
   // (auditoria/conferência), sem precisar listar as linhas individuais na tela.
+  // IMPORTANTE: isso é uma conveniência de auditoria, NÃO o core da funcionalidade
+  // (que é lançar os créditos no financeiro). Se o R2 estiver indisponível/mal
+  // configurado (ex.: bucket não habilitado na conta Cloudflare), a importação
+  // financeira não deve falhar por causa disso — apenas fica sem a cópia do
+  // arquivo anexada para download posterior. Sem isso, qualquer problema no R2
+  // derrubava a rota inteira com "Ocorreu um erro inesperado", mascarando o
+  // sucesso do parse/dedup dos créditos.
   const arquivoKey = `importacoes-nfp/${generateRandomKey()}-${nomeArquivo}`
-  await c.env.R2.put(arquivoKey, await arquivo.arrayBuffer(), {
-    httpMetadata: { contentType: arquivo.type || 'text/csv' }
-  })
+  let arquivoSalvoNoR2 = true
+  try {
+    await c.env.R2.put(arquivoKey, await arquivo.arrayBuffer(), {
+      httpMetadata: { contentType: arquivo.type || 'text/csv' }
+    })
+  } catch (err) {
+    arquivoSalvoNoR2 = false
+    console.error('[importar-nfp] Falha ao salvar arquivo original no R2 (importação prossegue sem a cópia para auditoria):', err)
+  }
+  const arquivoKeyParaSalvar = arquivoSalvoNoR2 ? arquivoKey : null
 
   if (resultado.linhasElegiveis.length === 0) {
     // Ainda registra a importação (com zero linhas novas) para ficar no histórico,
@@ -131,7 +145,7 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async
        (nome_arquivo, arquivo_original_key, total_linhas_arquivo, linhas_elegiveis, linhas_novas, linhas_duplicadas, linhas_ignoradas_zero_ou_a_calcular, valor_total_importado, importado_por)
        VALUES (?, ?, ?, 0, 0, 0, ?, 0, ?)`
     )
-      .bind(nomeArquivo, arquivoKey, resultado.totalLinhasArquivo, resultado.linhasIgnoradasZeroOuACalcular, actor.sub)
+      .bind(nomeArquivo, arquivoKeyParaSalvar, resultado.totalLinhasArquivo, resultado.linhasIgnoradasZeroOuACalcular, actor.sub)
       .run()
 
     await logAudit(c, {
@@ -153,8 +167,28 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async
     })
   }
 
+  // Deduplicação em duas camadas:
+  // 1) DENTRO do próprio arquivo: o site da NFP pode, em tese, listar a mesma
+  //    nota mais de uma vez na mesma exportação (ex.: reprocessamento do lado
+  //    deles). Mantemos só a primeira ocorrência de cada hash e contamos as
+  //    repetições como duplicadas também, para nunca lançar duas vezes o
+  //    mesmo crédito por causa de uma linha repetida no CSV.
+  // 2) CONTRA o banco: linhas cujo hash já foi importado em uma execução
+  //    anterior (ex.: mesmo arquivo reexportado/reenviado em outro mês).
+  const vistosNoArquivo = new Set<string>()
+  const linhasUnicasDoArquivo: typeof resultado.linhasElegiveis = []
+  let duplicadasDentroDoArquivo = 0
+  for (const linha of resultado.linhasElegiveis) {
+    if (vistosNoArquivo.has(linha.linhaHash)) {
+      duplicadasDentroDoArquivo++
+      continue
+    }
+    vistosNoArquivo.add(linha.linhaHash)
+    linhasUnicasDoArquivo.push(linha)
+  }
+
   // Verifica quais hashes já existem (já importados anteriormente) numa única query.
-  const hashes = resultado.linhasElegiveis.map((l) => l.linhaHash)
+  const hashes = linhasUnicasDoArquivo.map((l) => l.linhaHash)
   const placeholders = hashes.map(() => '?').join(',')
   const { results: existentes } = await c.env.DB.prepare(
     `SELECT linha_hash FROM financeiro_creditos_nfp WHERE linha_hash IN (${placeholders})`
@@ -163,8 +197,8 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async
     .all<{ linha_hash: string }>()
   const hashesExistentes = new Set((existentes ?? []).map((r) => r.linha_hash))
 
-  const linhasNovas = resultado.linhasElegiveis.filter((l) => !hashesExistentes.has(l.linhaHash))
-  const linhasDuplicadas = resultado.linhasElegiveis.length - linhasNovas.length
+  const linhasNovas = linhasUnicasDoArquivo.filter((l) => !hashesExistentes.has(l.linhaHash))
+  const linhasDuplicadas = duplicadasDentroDoArquivo + (linhasUnicasDoArquivo.length - linhasNovas.length)
   const valorTotal = linhasNovas.reduce((acc, l) => acc + l.creditos, 0)
 
   // 1) Cria o registro da importação primeiro (precisamos do id para vincular os créditos).
@@ -175,7 +209,7 @@ financeiro.post('/geral/importar-nfp', requireRole('admin', 'financeiro'), async
   )
     .bind(
       nomeArquivo,
-      arquivoKey,
+      arquivoKeyParaSalvar,
       resultado.totalLinhasArquivo,
       resultado.linhasElegiveis.length,
       linhasNovas.length,
