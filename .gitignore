@@ -33,3 +33,6 @@ lerna-debug.log*
 .DS_Store
 .env
 dist/
+
+# ambiente de teste local (MySQL, Node, dados)
+.local/
