@@ -8,6 +8,8 @@ import type { AppEnv } from './types/bindings'
 import { getDatabase } from './platform/db'
 import { getStorage } from './platform/storage'
 import { agendarLimpezaComprovantes } from './jobs/limpeza-comprovantes'
+import { embedMiddleware } from './middlewares/embed'
+import bancoRoutes from './modules/diag/banco'
 
 import authRoutes from './modules/auth/routes'
 import nucleosRoutes from './modules/nucleos/routes'
@@ -42,8 +44,14 @@ const db = getDatabase()
 const r2 = getStorage()
 const jwtSecret = process.env.JWT_SECRET || ''
 
+// Sem JWT_SECRET, tokens seriam assinados com chave vazia (qualquer pessoa
+// poderia forjar uma sessão de admin). Sem a variável, o processo não sobe.
 if (!jwtSecret) {
-  console.warn('[aviso] JWT_SECRET não definido no ambiente — defina-o antes de produção.')
+  console.error('[fatal] JWT_SECRET não definido. Defina-o nas variáveis de ambiente da Hostinger.')
+  process.exit(1)
+}
+if (jwtSecret.length < 32) {
+  console.warn('[aviso] JWT_SECRET com menos de 32 caracteres — recomendado trocar por um valor longo e aleatório.')
 }
 
 app.use('*', async (c, next) => {
@@ -52,6 +60,9 @@ app.use('*', async (c, next) => {
   c.env.JWT_SECRET = jwtSecret
   await next()
 })
+
+// frame-ancestors + proteção de origem quando o app é embutido (ver middlewares/embed.ts)
+app.use('*', embedMiddleware)
 
 // Handler de erro global: evita que exceções não tratadas virem um 500
 // "Internal Server Error" sem detalhe nenhum. Sempre loga a stack completa
@@ -105,6 +116,9 @@ app.route('/api/colaboradores', colaboradoresRoutes)
 app.route('/api/financeiro', financeiroRoutes)
 app.route('/api/comunicacao', comunicacaoRoutes)
 app.route('/api/public', publicoRoutes)
+
+// Visualização somente leitura do banco (apenas admin)
+app.route('/admin/banco', bancoRoutes)
 
 app.get('/n/:slug', async (c) => {
   const slug = c.req.param('slug')

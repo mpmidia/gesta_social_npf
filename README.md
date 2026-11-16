@@ -147,6 +147,61 @@ no banco.
    via tela de Repasses.
 5. Aplicar a migration 0008 no MySQL de produção, se ainda não aplicada.
 
+## Checagem pré-deploy (16/11/2026)
+
+Correções incluídas neste commit:
+- `src/index.ts`: o servidor não sobe sem `JWT_SECRET` (antes só avisava, e os
+  tokens seriam assinados com chave vazia).
+- `src/modules/auth/routes.ts`: cookie de sessão marcado como `Secure` também
+  atrás do proxy da Hostinger (lê `X-Forwarded-Proto`).
+- `src/middlewares/audit.ts`: IP do `X-Forwarded-For` reduzido ao primeiro
+  endereço e limitado a 64 caracteres (evita falha no INSERT do audit_log).
+- `src/modules/financeiro/routes.ts`:
+  - saída de pagamento: lançamento + 2 comprovantes gravados numa única
+    transação (antes eram duas, e uma falha na segunda deixava saída sem
+    comprovante);
+  - execução de repasse: saldo de origem reconferido antes de executar
+    (vários repasses pendentes podiam deixar o saldo negativo).
+- `src/platform/storage.ts`: checksums do SDK S3 limitados ao obrigatório,
+  configuração recomendada para o R2.
+- `migrations/mysql/diagnostico.sql`: consultas somente leitura para conferir
+  no phpMyAdmin quais migrations estão aplicadas e a integridade dos dados.
+- `src/middlewares/embed.ts` (novo): permite exibir o app dentro de um iframe
+  nas origens listadas em `EMBED_ORIGINS` (espelho de produção no ambiente de
+  design). Com a variável definida, o cookie de sessão vira
+  `SameSite=None; Secure; Partitioned` e toda escrita (POST/PUT/DELETE) com
+  `Origin` de outro domínio é recusada (proteção contra CSRF). Sem a variável,
+  nada muda, além do cabeçalho `frame-ancestors 'self'` (anti-clickjacking).
+- `src/modules/diag/banco.ts` (novo): `/admin/banco`, visualização somente
+  leitura de todas as tabelas e views (contagem + registros paginados, mais
+  recentes primeiro). Apenas admin; `senha_hash` nunca é exibido; cada acesso
+  fica no audit_log.
+
+Nenhuma migration nova; nenhuma mudança no front-end (`public/static/app.js`).
+Arquivos novos: `src/middlewares/embed.ts`, `src/modules/diag/banco.ts`,
+`migrations/mysql/diagnostico.sql`.
+
+Checklist do deploy:
+1. Variáveis no painel Node.js da Hostinger: `JWT_SECRET` (obrigatória),
+   `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `R2_ENDPOINT`,
+   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` e, para o
+   espelho, `EMBED_ORIGINS=https://claude.ai,https://*.claudeusercontent.com`.
+2. Build `npm run build`, arquivo de entrada `dist/index.js`.
+3. Rodar `migrations/mysql/diagnostico.sql` no phpMyAdmin; aplicar a 0008 se
+   o item aparecer com `ok = 0`.
+4. Após o push, conferir `https://nfp.social.br/api/_diag/versao` (deve mostrar
+   o hash do novo commit).
+5. Login com cada papel e teste do fluxo de repasse.
+
+Pontos observados e não alterados:
+- A edição de lançamento manual (`PUT /geral/lancamentos-manuais/:id`) altera
+  o valor de um lançamento já executado, o que contradiz a regra de ledger
+  imutável. Fica registrado no audit_log. Alternativa: cancelar e lançar de novo.
+- Login sem limite de tentativas.
+- `expira_em` do comprovante de depósito é calculado em UTC no Node, enquanto
+  as demais datas usam o fuso do MySQL (diferença de horas em 6 meses).
+- Tailwind via CDN (`cdn.tailwindcss.com`) gera aviso de uso em produção no console.
+
 ## Deploy
 - **Plataforma**: Hostinger (Node.js + MySQL), auto-deploy via push no GitHub.
 - **Status**: ✅ Deploy mais recente no ar (commit `9a2eeff`). Correções de

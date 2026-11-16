@@ -608,24 +608,24 @@ financeiro.post('/projeto/:projetoId/saidas', requireRole('admin', 'coord_nucleo
   const fiscalKey = await uploadComprovanteFile(c.env.R2, tempId as any, 'fiscal', comprovanteFiscal)
 
   // 2) Só agora que os arquivos já estão salvos com sucesso no R2, grava o
-  // lançamento (executado) e os dois registros de comprovante — atomicamente,
-  // via batch (transação real no MySQL).
+  // lançamento (executado) e os dois registros de comprovante numa ÚNICA
+  // transação. O id do lançamento é guardado em @lanc_id (mesma conexão do
+  // batch) — antes eram dois batches separados, e uma falha no segundo deixava
+  // uma saída executada sem comprovantes.
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       `INSERT INTO financeiro_lancamentos (nivel, projeto_id, nucleo_id, tipo, valor, status, finalidade, executado_por, executado_em)
        VALUES ('projeto', ?, ?, 'saida_pagamento', ?, 'executado', ?, ?, CURRENT_TIMESTAMP)`
-    ).bind(projetoId, projeto.nucleo_id, valor, finalidade, actor.sub)
+    ).bind(projetoId, projeto.nucleo_id, valor, finalidade, actor.sub),
+    c.env.DB.prepare('SET @lanc_id = LAST_INSERT_ID()'),
+    c.env.DB.prepare(
+      `INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por) VALUES (@lanc_id, 'bancario', ?, ?, ?)`
+    ).bind(bancarioKey, comprovanteBancario.name, actor.sub),
+    c.env.DB.prepare(
+      `INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por) VALUES (@lanc_id, 'fiscal', ?, ?, ?)`
+    ).bind(fiscalKey, comprovanteFiscal.name, actor.sub)
   ])
   const lancamentoId = results[0].meta.last_row_id as number
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      'INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?)'
-    ).bind(lancamentoId, 'bancario', bancarioKey, comprovanteBancario.name, actor.sub),
-    c.env.DB.prepare(
-      'INSERT INTO comprovantes (lancamento_id, tipo, r2_key, nome_arquivo, enviado_por) VALUES (?, ?, ?, ?, ?)'
-    ).bind(lancamentoId, 'fiscal', fiscalKey, comprovanteFiscal.name, actor.sub)
-  ])
 
   await logAudit(c, {
     userId: actor.sub,
@@ -810,6 +810,19 @@ financeiro.post('/repasses/:id/executar', requireRole('admin', 'financeiro'), as
   }
   if (lancamento.status !== 'aprovado') {
     return errorResponse(c, 409, 'O repasse precisa estar aprovado antes de ser executado.')
+  }
+
+  // O saldo é conferido na solicitação, mas vários repasses podem ficar
+  // pendentes ao mesmo tempo. Reconfere na execução para o saldo de origem
+  // nunca ficar negativo.
+  const saldoOrigem =
+    lancamento.tipo === 'repasse_geral_nucleo'
+      ? await c.env.DB.prepare('SELECT saldo FROM saldo_geral').first<{ saldo: number }>()
+      : await c.env.DB.prepare('SELECT saldo FROM saldo_nucleo WHERE nucleo_id = ?').bind(lancamento.nucleo_id).first<{ saldo: number }>()
+  const saldoDisponivel = saldoOrigem?.saldo ?? 0
+  if (Number(lancamento.valor) > saldoDisponivel) {
+    const origem = lancamento.tipo === 'repasse_geral_nucleo' ? 'geral' : 'do núcleo'
+    return errorResponse(c, 422, `Saldo ${origem} insuficiente para executar este repasse. Saldo atual: R$ ${saldoDisponivel.toFixed(2)}.`)
   }
 
   const formData = await c.req.formData().catch(() => null)

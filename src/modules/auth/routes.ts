@@ -8,6 +8,15 @@ import { errorResponse, okResponse } from '../../utils/response'
 import { logAudit } from '../../middlewares/audit'
 import { authMiddleware } from '../../middlewares/auth'
 import { requireRole } from '../../middlewares/rbac'
+import { embedHabilitado } from '../../middlewares/embed'
+
+// Com EMBED_ORIGINS definida, o cookie precisa ser SameSite=None + Partitioned para
+// funcionar dentro do iframe (a proteção contra CSRF fica no embedMiddleware).
+function opcoesCookie(isHttps: boolean) {
+  return embedHabilitado
+    ? { httpOnly: true, secure: true, sameSite: 'None' as const, partitioned: true, path: '/' }
+    : { httpOnly: true, secure: isHttps, sameSite: 'Lax' as const, path: '/' }
+}
 
 const auth = new Hono<AppEnv>()
 
@@ -57,12 +66,12 @@ auth.post('/login', async (c) => {
     c.env.JWT_SECRET
   )
 
-  const isHttps = new URL(c.req.url).protocol === 'https:'
+  // Atrás do proxy da Hostinger o Node recebe HTTP puro; o protocolo real vem em X-Forwarded-Proto.
+  const isHttps =
+    new URL(c.req.url).protocol === 'https:' ||
+    (c.req.header('X-Forwarded-Proto') || '').split(',')[0].trim() === 'https'
   setCookie(c, COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: isHttps,
-    sameSite: 'Lax',
-    path: '/',
+    ...opcoesCookie(isHttps),
     maxAge: 60 * 60 * 12
   })
 
@@ -74,7 +83,7 @@ auth.post('/login', async (c) => {
 // ===== LOGOUT =====
 auth.post('/logout', authMiddleware, async (c) => {
   const user = c.get('user')
-  deleteCookie(c, COOKIE_NAME, { path: '/' })
+  deleteCookie(c, COOKIE_NAME, opcoesCookie(true))
   await logAudit(c, { userId: user.sub, acao: 'auth.logout', entidade: 'users', entidadeId: user.sub })
   return okResponse(c, { message: 'Logout realizado.' })
 })
