@@ -104,6 +104,17 @@ export function decodificarConteudoNFP(bytesEntrada: ArrayBuffer): string {
     bytes = bytesEntrada.slice(3)
   }
 
+  // O site da NFP exporta a "Consulta de Créditos" em UTF-16 LE (bytes
+  // iniciais FF FE, dois bytes por caractere, TAB como separador). Sem
+  // este tratamento o arquivo caía no Windows-1252 abaixo, o BOM virava
+  // "ÿþ" colado em "CNPJ emit." e a coluna cnpjemit não era encontrada.
+  const utf16 = detectarUtf16(new Uint8Array(bytes))
+  if (utf16) {
+    let texto = new TextDecoder(utf16).decode(bytes)
+    if (texto.charCodeAt(0) === 0xfeff) texto = texto.slice(1)
+    return texto
+  }
+
   // 'fatal: true' faz o decoder lançar exceção em vez de silenciosamente
   // inserir U+FFFD (replacement character) quando os bytes não formam
   // UTF-8 válido — é assim que detectamos que o arquivo não é UTF-8.
@@ -131,6 +142,31 @@ export function decodificarConteudoNFP(bytesEntrada: ArrayBuffer): string {
   }
 
   return texto
+}
+
+/**
+ * Retorna 'utf-16le' / 'utf-16be' quando os bytes são UTF-16: pelo BOM
+ * (FF FE / FE FF) ou, sem BOM, quando os bytes nulos se concentram nas
+ * posições ímpares (LE) ou pares (BE) — texto latino em UTF-16 tem um
+ * byte 0x00 a cada caractere, o que nunca acontece em UTF-8/Windows-1252.
+ */
+function detectarUtf16(b: Uint8Array): 'utf-16le' | 'utf-16be' | null {
+  if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) return 'utf-16le'
+  if (b.length >= 2 && b[0] === 0xfe && b[1] === 0xff) return 'utf-16be'
+  const amostra = Math.min(b.length - (b.length % 2), 2000)
+  if (amostra < 4) return null
+  let nulosPar = 0
+  let nulosImpar = 0
+  for (let i = 0; i < amostra; i++) {
+    if (b[i] === 0) {
+      if (i % 2 === 0) nulosPar++
+      else nulosImpar++
+    }
+  }
+  const pares = amostra / 2
+  if (nulosImpar > pares * 0.4 && nulosPar < pares * 0.05) return 'utf-16le'
+  if (nulosPar > pares * 0.4 && nulosImpar < pares * 0.05) return 'utf-16be'
+  return null
 }
 
 function normalizarCabecalho(h: string): string {
