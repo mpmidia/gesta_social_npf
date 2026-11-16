@@ -147,7 +147,7 @@ no banco.
    via tela de Repasses.
 5. Aplicar a migration 0008 no MySQL de produção, se ainda não aplicada.
 
-## Deploy## Checagem pré-de11/2026)
+## Checagem pré-deploy (16/11/2026)
 
 Correções incluídas neste commit:
 - `src/index.ts`: o servidor não sobe sem `JWT_SECRET` (antes só avisava, e os
