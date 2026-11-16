@@ -40,6 +40,10 @@ function getClient(): S3Client {
     client = new S3Client({
       region: 'auto',
       endpoint: process.env.R2_ENDPOINT, // ex: https://<account_id>.r2.cloudflarestorage.com
+      // O SDK v3 (>= 3.729) envia checksums CRC32 por padrão; o R2 recomenda
+      // limitar ao obrigatório para evitar erro "not implemented" no PutObject.
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
       credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || ''
