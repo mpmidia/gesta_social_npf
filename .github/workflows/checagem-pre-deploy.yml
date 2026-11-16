@@ -1,0 +1,28 @@
+name: Checagem pré-deploy
+
+# Roda em todo push para a main (que dispara o auto-deploy da Hostinger) e em
+# pull requests. Se falhar, o commit fica com ❌ no GitHub e o autor recebe
+# e-mail — sinal para corrigir ou reverter antes que o problema fique no ar.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checagem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # mesma versão major da produção (Hostinger)
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Build + checagem
+        run: npm run check
