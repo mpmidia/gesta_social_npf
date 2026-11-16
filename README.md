@@ -147,7 +147,7 @@ no banco.
    via tela de Repasses.
 5. Aplicar a migration 0008 no MySQL de produção, se ainda não aplicada.
 
-## Deploy## Checagem pré-deploy (16/11/2026)
+## Deploy## Checagem pré-de11/2026)
 
 Correções incluídas neste commit:
 - `src/index.ts`: o servidor não sobe sem `JWT_SECRET` (antes só avisava, e os
@@ -202,7 +202,7 @@ Pontos observados e não alterados:
   as demais datas usam o fuso do MySQL (diferença de horas em 6 meses).
 - Tailwind via CDN (`cdn.tailwindcss.com`) gera aviso de uso em produção no console.
 
-
+## Deploy
 - **Plataforma**: Hostinger (Node.js + MySQL), auto-deploy via push no GitHub.
 - **Status**: ✅ Deploy mais recente no ar (commit `9a2eeff`). Correções de
   navegação/bug do núcleo para coord_nucleo e menu do financeiro já em
