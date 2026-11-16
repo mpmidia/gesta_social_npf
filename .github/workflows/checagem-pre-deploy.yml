@@ -5,7 +5,7 @@ name: Checagem pré-deploy
 # e-mail — sinal para corrigir ou reverter antes que o problema fique no ar.
 on:
   push:
-    branches: [main]
+    branches: [main, teste]
   pull_request:
   workflow_dispatch:
 
